@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Logo } from "@/components/Logo";
@@ -8,154 +15,190 @@ import { Icon } from "@/components/Icon";
 import {
   getClientId,
   getSocket,
+  isTimed,
   type ChatMessage,
   type DeniedReason,
+  type LiveReaction,
+  type Media,
+  type Moment,
+  type Perms,
   type PlayerAction,
+  type Poll,
+  type PollClosed,
+  type QueueReply,
+  type QueueState,
+  type RoomSettings,
+  type RoomSnapshot,
   type RoomUser,
+  type YoutubeMedia,
 } from "@/lib/socket";
 import { parseYouTubeId } from "@/lib/youtube";
 import { useCall } from "./useCall";
 import { Avatar, CallPanel } from "./CallPanel";
+import { Chat } from "./Chat";
+import { LiveStageView } from "./LiveStageView";
 import { PeoplePanel } from "./PeoplePanel";
+import { PollCard, PollComposer, VoteButtons } from "./Polls";
+import { QueuePanel } from "./QueuePanel";
+import { MomentsTimeline, ReactionBar, ReactionOverlay } from "./Reactions";
+import { ShareMenu } from "./ShareMenu";
+import { useClockOffset } from "./useClockOffset";
+import { useLiveStage } from "./useLiveStage";
+import { useSyncedPlayer } from "./useSyncedPlayer";
+import { SyncStatus, syncStateOf } from "./SyncStatus";
 
-let apiLoading: Promise<void> | null = null;
-function loadYouTubeApi(): Promise<void> {
-  if (typeof window === "undefined") return Promise.resolve();
-  if (window.YT && window.YT.Player) return Promise.resolve();
-  if (apiLoading) return apiLoading;
-  apiLoading = new Promise<void>((resolve) => {
-    const tag = document.createElement("script");
-    tag.src = "https://www.youtube.com/iframe_api";
-    window.onYouTubeIframeAPIReady = () => resolve();
-    document.head.appendChild(tag);
-  });
-  return apiLoading;
-}
+const ACK_TIMEOUT = 8000;
 
 // Leaving is deferred a tick so React's dev-mode double mount (unmount +
 // immediate remount) doesn't bounce you out of the room and back in.
 let leaveTimer: ReturnType<typeof setTimeout> | undefined;
 
+// The display name lives in localStorage. "" = none saved (go to /join);
+// null = not on the client yet (server render / hydration).
+const noSubscribe = () => () => {};
+function readSavedName(): string {
+  try {
+    return localStorage.getItem("wnp-name") ?? "";
+  } catch {
+    return "";
+  }
+}
+
+const EMPTY_QUEUE: QueueState = { items: [], history: [] };
+/** How long a closed poll's result stays on screen. */
+const POLL_RESULT_MS = 8000;
+/** Local cap on the reactions timeline (the server sends its own list). */
+const MAX_MOMENTS = 500;
+
 export function RoomClient({ code }: { code: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [name, setName] = useState<string | null>(null);
+  const name = useSyncExternalStore(noSubscribe, readSavedName, () => null);
   const [connected, setConnected] = useState(false);
   const [users, setUsers] = useState<RoomUser[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [videoId, setVideoId] = useState<string | null>(null);
+  const [queue, setQueue] = useState<QueueState>(EMPTY_QUEUE);
   const [urlInput, setUrlInput] = useState("");
+  const [adding, setAdding] = useState(false);
   const [copied, setCopied] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [needsGesture, setNeedsGesture] = useState(false);
   const [selfId, setSelfId] = useState<string | null>(null);
   const [selfBrowser, setSelfBrowser] = useState<string | null>(null);
   const [hostId, setHostId] = useState<string | null>(null);
-  const [locked, setLocked] = useState(false);
+  const [settings, setSettings] = useState<RoomSettings>({
+    locked: false,
+    playback: "host",
+    approval: true,
+    order: "votes",
+    autoplay: true,
+    voteSkip: false,
+    hasPassword: false,
+  });
+  const [pinned, setPinned] = useState<ChatMessage | null>(null);
+  const [moments, setMoments] = useState<Moment[]>([]);
+  const [poll, setPoll] = useState<Poll | null>(null);
+  const [lastClosed, setLastClosed] = useState<PollClosed | null>(null);
+  const [composerOpen, setComposerOpen] = useState(false);
   const [denied, setDenied] = useState<{
     reason: DeniedReason;
     wasHost: boolean;
   } | null>(null);
+  // Password rooms: the gate shows instead of the room until one is accepted.
+  const [passwordGate, setPasswordGate] = useState<{
+    wrong: boolean;
+    /** Too many attempts: the server stopped checking for a minute. */
+    limited: boolean;
+    checking: boolean;
+  } | null>(null);
+  // Kept in memory only (never the URL or storage), so a reconnect during
+  // this page session can rejoin without asking again.
+  const passwordRef = useRef<string | null>(null);
   const deniedRef = useRef(false);
+  const lastClosedTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined
+  );
+  const mediaRef = useRef<Media | null>(null);
+  const lastNoControlToastRef = useRef(0);
   const hostIdRef = useRef<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined
+  );
 
-  const playerRef = useRef<YT.Player | null>(null);
-  const playerReadyRef = useRef(false);
-  const applyingRemote = useRef(false);
-  const pendingAction = useRef<PlayerAction | null>(null);
-  const lastTimeRef = useRef(0);
-  // Once the user has clicked into the page, browsers allow programmatic
-  // playback — so the autoplay gate should never reappear after that.
-  const hasInteractedRef = useRef(false);
-  const recoveredRef = useRef(false);
-
-  // Resolve display name (or bounce to /join).
+  // No saved name: pick one first, then come back.
   useEffect(() => {
-    const saved =
-      typeof window !== "undefined" ? localStorage.getItem("wnp-name") : null;
-    if (!saved) {
-      router.replace(`/join?next=${encodeURIComponent(code)}`);
-      return;
-    }
-    setName(saved);
-  }, [code, router]);
+    if (name === "") router.replace(`/join?next=${encodeURIComponent(code)}`);
+  }, [name, code, router]);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
-    setTimeout(() => setToast(null), 2200);
+    clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(null), 2200);
   }, []);
 
   const call = useCall(showToast);
 
-  // ---- Apply an incoming remote action to the local player ----
-  const applyRemote = useCallback((a: PlayerAction) => {
-    const p = playerRef.current;
-    if (!p || !playerReadyRef.current) {
-      pendingAction.current = a;
-      return;
-    }
-    applyingRemote.current = true;
-    try {
-      if (a.videoId && a.type === "load") {
-        // No startSeconds: VOD starts at 0, live streams start at the live edge
-        // (seeking a live stream to 0 throws "recording not available").
-        p.loadVideoById(a.videoId);
-      } else {
-        if (typeof a.time === "number") {
-          // Never seek a live/manifestless stream to an absolute timestamp —
-          // it lands outside the DVR window ("recording not available"). Live
-          // viewers are already synced at the live edge. YouTube reports an
-          // absurd duration (~1e8s) for these, so treat anything longer than a
-          // sane video (24h) as non-seekable. Only catch up real VODs.
-          let dur = 0;
-          try {
-            dur = p.getDuration();
-          } catch {
-            /* noop */
-          }
-          const isSeekable = dur > 0 && dur < 86400; // ≤ 24h ⇒ a real VOD
-          const drift = Math.abs(p.getCurrentTime() - a.time);
-          if (isSeekable && a.time < dur && drift > 0.6) {
-            p.seekTo(a.time, true);
-          }
-        }
-        if (a.type === "play" || a.isPlaying) {
-          p.playVideo();
-          // Browsers block programmatic autoplay without a user gesture. If the
-          // video hasn't actually started shortly after, surface a tap-to-start gate.
-          setTimeout(() => {
-            if (hasInteractedRef.current) return;
-            try {
-              if (p.getPlayerState() !== window.YT!.PlayerState.PLAYING) {
-                setNeedsGesture(true);
-              }
-            } catch {
-              /* noop */
-            }
-          }, 1200);
-        }
-        if (a.type === "pause") p.pauseVideo();
-      }
-    } catch {
-      /* player not fully ready */
-    }
-    setTimeout(() => (applyingRemote.current = false), 800);
-  }, []);
+  const self = users.find((u) => u.id === selfId);
+  const perms: Perms = self?.perms ?? { video: false, chat: true, call: true };
+  const selfIsAdmin = !!self && (self.id === hostId || self.owner);
+  // Room-wide switches: the creator, or the host standing in while they're away.
+  const ownerHere = users.some((u) => u.owner);
+  const canRunRoom = !!self?.owner || (!!selfId && selfId === hostId && !ownerHere);
+  const readyCount = queue.items.filter((q) => q.status === "ready").length;
 
-  // User gesture to unblock playback for a late joiner, then snap to the room.
-  function startPlayback() {
-    hasInteractedRef.current = true;
-    setNeedsGesture(false);
-    const p = playerRef.current;
-    try {
-      p?.playVideo();
-    } catch {
-      /* noop */
-    }
-    getSocket().emit("player:request-sync");
+  const noControlToast = useCallback(() => {
+    const now = Date.now();
+    if (now - lastNoControlToastRef.current < 4000) return;
+    lastNoControlToastRef.current = now;
+    showToast("Only the host can control the video");
+  }, [showToast]);
+
+  const serverNow = useClockOffset();
+  const {
+    media,
+    mountRef,
+    needsGesture,
+    startPlayback,
+    resync: requestSync,
+    destroy: destroyPlayer,
+    sync,
+    duration,
+    getVideoTime,
+    seekTo,
+  } = useSyncedPlayer({
+    serverNow,
+    canControl: perms.video,
+    onToast: showToast,
+    onNoControl: noControlToast,
+  });
+  useEffect(() => {
+    mediaRef.current = media;
+  }, [media]);
+
+  const stage = useLiveStage({ media, selfId, onToast: showToast });
+
+  // Join (or rejoin) the room, with the remembered password if there is one.
+  const emitJoin = useCallback(() => {
+    if (!name) return;
+    getSocket().emit("room:join", {
+      code,
+      name,
+      clientId: getClientId(),
+      title: searchParams.get("title") || undefined,
+      isPublic: searchParams.get("public") === "1",
+      password: passwordRef.current ?? undefined,
+    });
+  }, [code, name, searchParams]);
+
+  function submitPassword(password: string) {
+    passwordRef.current = password;
+    // Let joins through again: this one, and a reconnect's if the socket
+    // drops before the answer arrives.
+    deniedRef.current = false;
+    setPasswordGate({ wrong: false, limited: false, checking: true });
+    if (getSocket().connected) emitJoin();
   }
 
-  // ---- Socket wiring ----
+  // ---- Socket wiring (playback events live in useSyncedPlayer) ----
   useEffect(() => {
     if (!name) return;
     const socket = getSocket();
@@ -164,49 +207,60 @@ export function RoomClient({ code }: { code: string }) {
     const onConnect = () => {
       setConnected(true);
       setSelfId(socket.id ?? null);
-      // Removed / ended: don't let a reconnect quietly walk back in.
+      // Removed / ended / waiting on a password: don't let a reconnect
+      // quietly walk back in (or loop on the password prompt).
       if (deniedRef.current) return;
-      socket.emit("room:join", {
-        code,
-        name,
-        clientId: getClientId(),
-        title: searchParams.get("title") || undefined,
-        isPublic: searchParams.get("public") === "1",
-      });
+      // A reconnect rejoins; the room:state reply resyncs the player.
+      emitJoin();
     };
-    const onState = (s: {
-      videoId: string | null;
-      isPlaying: boolean;
-      time: number;
-      hostId: string | null;
-      locked: boolean;
-      selfBrowser: string;
-      users: RoomUser[];
-      messages: ChatMessage[];
-    }) => {
+    const onState = (s: RoomSnapshot) => {
+      setPasswordGate(null);
       setUsers(s.users);
       setSelfBrowser(s.selfBrowser);
       setHostId(s.hostId);
       hostIdRef.current = s.hostId;
-      setLocked(!!s.locked);
+      setSettings(s.settings);
       setMessages(s.messages || []);
-      if (s.videoId) {
-        setVideoId(s.videoId);
-        pendingAction.current = {
-          type: s.isPlaying ? "play" : "pause",
-          time: s.time,
-          videoId: s.videoId,
-          isPlaying: s.isPlaying,
-        };
-      }
+      setQueue(s.queue || EMPTY_QUEUE);
+      setPinned(s.pinned ?? null);
+      setMoments(s.moments ?? []);
+      setPoll(s.poll ?? null);
     };
     const onUsers = (u: RoomUser[]) => setUsers(u);
     const onChat = (m: ChatMessage) =>
       setMessages((prev) => [...prev.slice(-199), m]);
-    const onAction = (a: PlayerAction) => {
-      if (a.videoId && a.videoId !== videoId) setVideoId(a.videoId);
-      if (a.by) showToast(`${a.by} ${labelFor(a.type)}`);
-      applyRemote(a);
+    // Reactions on a message changed: replace it in place.
+    const onChatUpdate = (m: ChatMessage) => {
+      setMessages((prev) => prev.map((x) => (x.id === m.id ? m : x)));
+      setPinned((p) => (p && p.id === m.id ? m : p));
+    };
+    const onChatRemoved = (id: string) => {
+      setMessages((prev) => prev.filter((x) => x.id !== id));
+      setPinned((p) => (p && p.id === id ? null : p));
+    };
+    const onChatPinned = (m: ChatMessage | null) => setPinned(m);
+    const onQueue = (q: QueueState) => setQueue(q);
+
+    // Floating reactions land on the video's timeline (YouTube only).
+    const onReaction = (r: LiveReaction) => {
+      const t = r.t;
+      if (t === null || !isTimed(mediaRef.current)) return;
+      setMoments((prev) => [...prev.slice(-(MAX_MOMENTS - 1)), { t, e: r.emoji }]);
+    };
+    // Any load (new video, replay, live share, cleared stage) starts a fresh
+    // timeline.
+    const onPlayerAction = (a: PlayerAction) => {
+      if (a.type === "load") setMoments([]);
+    };
+    const onPollUpdate = (p: Poll | null) => setPoll(p);
+    const onPollClosed = (c: PollClosed) => {
+      setLastClosed(c);
+      setPoll((p) => (p && p.id === c.poll.id ? null : p));
+      clearTimeout(lastClosedTimerRef.current);
+      lastClosedTimerRef.current = setTimeout(
+        () => setLastClosed(null),
+        POLL_RESULT_MS
+      );
     };
 
     const onHost = (id: string | null) => {
@@ -214,17 +268,37 @@ export function RoomClient({ code }: { code: string }) {
       hostIdRef.current = id;
       if (id && id === socket.id) showToast("You're the host now");
     };
-    const onLocked = (l: boolean) => setLocked(l);
-    const onDenied = ({ reason }: { reason: DeniedReason }) => {
+    const onSettings = (next: RoomSettings) => setSettings(next);
+    const onNotice = (text: string) => showToast(text);
+    const onDenied = ({
+      reason,
+      wrong,
+      limited,
+    }: {
+      reason: DeniedReason;
+      wrong?: boolean;
+      /** Password attempts are rate-limited; this one wasn't checked. */
+      limited?: boolean;
+    }) => {
+      // Either way we're outside the room now: no auto-rejoin on reconnect
+      // and no room:leave on unmount. (useLiveStage hears this too and
+      // stops any share / viewing locally; destroyPlayer clears `media`.)
       deniedRef.current = true;
       call.teardown();
-      try {
-        playerRef.current?.destroy();
-      } catch {
-        /* noop */
+      destroyPlayer();
+      if (reason === "password") {
+        if (limited) {
+          // Not a verdict on the password: keep it for the next try.
+          setPasswordGate({ wrong: false, limited: true, checking: false });
+          return;
+        }
+        // A remembered password that stopped working (changed by the host)
+        // is forgotten, so the next reconnect doesn't retry it.
+        if (wrong) passwordRef.current = null;
+        setPasswordGate({ wrong: !!wrong, limited: false, checking: false });
+        return;
       }
-      playerRef.current = null;
-      playerReadyRef.current = false;
+      setPasswordGate(null);
       setDenied({ reason, wasHost: hostIdRef.current === socket.id });
     };
     const onDisconnect = () => setConnected(false);
@@ -234,10 +308,18 @@ export function RoomClient({ code }: { code: string }) {
     socket.on("room:state", onState);
     socket.on("room:users", onUsers);
     socket.on("room:host", onHost);
-    socket.on("room:locked", onLocked);
+    socket.on("room:settings", onSettings);
+    socket.on("room:notice", onNotice);
     socket.on("room:denied", onDenied);
     socket.on("chat:message", onChat);
-    socket.on("player:action", onAction);
+    socket.on("chat:update", onChatUpdate);
+    socket.on("chat:removed", onChatRemoved);
+    socket.on("chat:pinned", onChatPinned);
+    socket.on("queue:update", onQueue);
+    socket.on("reaction", onReaction);
+    socket.on("player:action", onPlayerAction);
+    socket.on("poll:update", onPollUpdate);
+    socket.on("poll:closed", onPollClosed);
 
     if (socket.connected) onConnect();
 
@@ -247,10 +329,19 @@ export function RoomClient({ code }: { code: string }) {
       socket.off("room:state", onState);
       socket.off("room:users", onUsers);
       socket.off("room:host", onHost);
-      socket.off("room:locked", onLocked);
+      socket.off("room:settings", onSettings);
+      socket.off("room:notice", onNotice);
       socket.off("room:denied", onDenied);
       socket.off("chat:message", onChat);
-      socket.off("player:action", onAction);
+      socket.off("chat:update", onChatUpdate);
+      socket.off("chat:removed", onChatRemoved);
+      socket.off("chat:pinned", onChatPinned);
+      socket.off("queue:update", onQueue);
+      socket.off("reaction", onReaction);
+      socket.off("player:action", onPlayerAction);
+      socket.off("poll:update", onPollUpdate);
+      socket.off("poll:closed", onPollClosed);
+      clearTimeout(lastClosedTimerRef.current);
       // Client-side navigation away from the room: free our seat right away
       // instead of waiting for the socket to drop.
       if (!deniedRef.current) {
@@ -260,113 +351,69 @@ export function RoomClient({ code }: { code: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, code]);
 
-  // ---- Build / rebuild the YouTube player when a video is set ----
-  useEffect(() => {
-    if (!videoId) return;
-    let cancelled = false;
-
-    loadYouTubeApi().then(() => {
-      if (cancelled) return;
-
-      const emit = (type: PlayerAction["type"], time: number) => {
-        if (applyingRemote.current) return;
-        getSocket().emit("player:action", { type, time, videoId });
-      };
-
-      if (playerRef.current) {
-        applyingRemote.current = true;
-        playerRef.current.loadVideoById(videoId);
-        setTimeout(() => (applyingRemote.current = false), 800);
-        return;
-      }
-
-      playerRef.current = new window.YT!.Player("yt-player", {
-        videoId,
-        playerVars: {
-          autoplay: 0,
-          modestbranding: 1,
-          rel: 0,
-          playsinline: 1,
-        },
-        events: {
-          onReady: () => {
-            playerReadyRef.current = true;
-            if (pendingAction.current) {
-              applyRemote(pendingAction.current);
-              pendingAction.current = null;
-            }
-          },
-          onError: (e) => {
-            // A live stream seeked outside its DVR window throws
-            // "recording not available". Recover once by reloading at the
-            // live edge (no seek). Guard against reload loops.
-            if (recoveredRef.current) return;
-            recoveredRef.current = true;
-            applyingRemote.current = true;
-            try {
-              e.target.loadVideoById(videoId);
-            } catch {
-              /* noop */
-            }
-            setTimeout(() => (applyingRemote.current = false), 1000);
-          },
-          onStateChange: (e) => {
-            const p = e.target;
-            const t = p.getCurrentTime();
-            // Detect a scrub: large jump from last sampled time.
-            if (
-              !applyingRemote.current &&
-              Math.abs(t - lastTimeRef.current) > 1.6
-            ) {
-              emit("seek", t);
-            }
-            lastTimeRef.current = t;
-            if (e.data === window.YT!.PlayerState.PLAYING) emit("play", t);
-            if (e.data === window.YT!.PlayerState.PAUSED) emit("pause", t);
-          },
-        },
-      });
-    });
-
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoId]);
-
-  // Sample current time so seek detection has a reference point.
-  useEffect(() => {
-    const id = setInterval(() => {
-      const p = playerRef.current;
-      if (p && playerReadyRef.current) {
-        try {
-          lastTimeRef.current = p.getCurrentTime();
-        } catch {
-          /* noop */
-        }
-      }
-    }, 900);
-    return () => clearInterval(id);
-  }, []);
-
-  function loadVideo() {
+  // Play now: straight onto the stage. The server echoes the load back to
+  // everyone (us included), and that's what actually swaps the video.
+  function playNow() {
+    if (!perms.video) {
+      noControlToast();
+      return;
+    }
     const id = parseYouTubeId(urlInput);
     if (!id) {
       showToast("That doesn't look like a YouTube link");
       return;
     }
     setUrlInput("");
-    setVideoId(id);
-    getSocket().emit("player:action", { type: "load", videoId: id, time: 0 });
+    const next: YoutubeMedia = { kind: "youtube", id };
+    getSocket().emit("player:action", { type: "load", media: next });
+  }
+
+  function addToQueue() {
+    const input = urlInput.trim();
+    if (!input || adding) return;
+    if (!perms.chat) {
+      showToast("The host turned off your suggestions");
+      return;
+    }
+    setAdding(true);
+    getSocket()
+      .timeout(ACK_TIMEOUT)
+      .emit("queue:add", { input }, (err: Error | null, res?: QueueReply) => {
+        setAdding(false);
+        if (err || !res) return showToast("Couldn't reach the room — try again");
+        if (!res.ok) return showToast(res.error || "Couldn't add that video");
+        setUrlInput("");
+        if (res.status === "pending") {
+          showToast(
+            res.duplicate
+              ? "Already suggested — waiting for the host"
+              : "Sent to the host for approval"
+          );
+        } else {
+          showToast(
+            res.duplicate ? "Already queued — counted your vote" : "Added to Up next"
+          );
+        }
+      });
+  }
+
+  function skip() {
+    getSocket()
+      .timeout(ACK_TIMEOUT)
+      .emit("queue:skip", {}, (err: Error | null, res?: QueueReply) => {
+        if (err || !res) return showToast("Couldn't reach the room — try again");
+        if (!res.ok) showToast(res.error || "Couldn't skip right now");
+      });
   }
 
   function resync() {
-    getSocket().emit("player:request-sync");
+    requestSync();
     showToast("Re-syncing to the room…");
   }
 
   function copyLink() {
-    navigator.clipboard?.writeText(window.location.href);
+    // A clean link: no ?title/&public leftovers from when the room was made.
+    navigator.clipboard?.writeText(`${window.location.origin}/room/${code}`);
     setCopied(true);
     setTimeout(() => setCopied(false), 1600);
   }
@@ -374,106 +421,255 @@ export function RoomClient({ code }: { code: string }) {
   if (!name) return null;
   if (denied) return <RoomClosed {...denied} />;
 
+  const timed = isTimed(media);
+  const liveMedia = media?.kind === "live" ? media : null;
+  const syncState = syncStateOf(connected, sync, !!liveMedia);
+  const hasLink = urlInput.trim().length > 0;
+  const canCallVote = selfIsAdmin || (settings.voteSkip && perms.chat);
+
+  // The password gate covers the room rather than replacing it: the player's
+  // mount node has to exist the moment the accepted join's room:state lands.
   return (
-    <div className="flex min-h-screen flex-col">
-      <RoomHeader
-        code={code}
-        users={users}
-        hostId={hostId}
-        connected={connected}
-        copied={copied}
-        onCopy={copyLink}
-      />
-
-      <div className="mx-auto grid w-full max-w-7xl flex-1 gap-4 px-4 py-4 lg:grid-cols-[1fr_360px]">
-        {/* Player column */}
-        <div className="flex flex-col gap-4">
-          <div className="relative aspect-video w-full overflow-hidden rounded-panel border border-edge bg-ink">
-            {videoId ? (
-              <div id="yt-player" className="h-full w-full" />
-            ) : (
-              <EmptyStage />
-            )}
-            {videoId && needsGesture && (
-              <button
-                onClick={startPlayback}
-                className="absolute inset-0 z-10 grid place-items-center bg-ink/80 backdrop-blur-sm transition"
-              >
-                <span className="flex flex-col items-center gap-4">
-                  <span className="grid h-20 w-20 place-items-center rounded-full bg-signal shadow-[0_0_50px_-8px_rgba(244,67,60,0.85)] transition hover:scale-105">
-                    <svg width={30} height={30} viewBox="0 0 24 24" fill="white">
-                      <path d="M8 5v14l11-7z" />
-                    </svg>
-                  </span>
-                  <span className="text-sm font-semibold">
-                    Tap to join the watch party
-                  </span>
-                  <span className="text-xs text-smoke">
-                    Your browser paused autoplay — this syncs you to everyone else
-                  </span>
-                </span>
-              </button>
-            )}
-          </div>
-
-          <div className="flex flex-col gap-2 rounded-panel border border-edge bg-film p-3 sm:flex-row">
-            <input
-              value={urlInput}
-              onChange={(e) => setUrlInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && loadVideo()}
-              placeholder="Paste a YouTube link to play for everyone…"
-              className="w-full rounded-card border border-edge bg-ink px-4 py-3 text-sm outline-none transition focus:border-signal/60"
-            />
-            <div className="flex gap-2">
-              <button
-                onClick={loadVideo}
-                className="flex-1 whitespace-nowrap rounded-card bg-signal px-5 py-3 text-sm font-semibold transition hover:bg-signal-hot active:scale-95 sm:flex-none"
-              >
-                Play for all
-              </button>
-              <button
-                onClick={resync}
-                title="Snap to the room's current position"
-                className="rounded-card border border-edge bg-bone/5 px-4 py-3 text-sm font-medium transition hover:bg-bone/10"
-              >
-                Resync
-              </button>
-            </div>
-          </div>
-
-          <CallPanel call={call} users={users} selfId={selfId} />
-        </div>
-
-        <SidePanel
+    <>
+      <div
+        className="flex min-h-screen flex-col"
+        inert={!!passwordGate}
+        aria-hidden={passwordGate ? true : undefined}
+      >
+        <RoomHeader
+          code={code}
           users={users}
-          selfId={selfId}
-          selfBrowser={selfBrowser}
           hostId={hostId}
-          locked={locked}
-          messages={messages}
+          connected={connected}
+          copied={copied}
+          onCopy={copyLink}
         />
-      </div>
 
-      {toast && (
-        <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full border border-edge bg-film-2/95 px-5 py-2.5 text-sm shadow-xl backdrop-blur">
-          {toast}
+        <div className="mx-auto grid w-full max-w-7xl flex-1 gap-4 px-4 py-4 lg:grid-cols-[1fr_360px]">
+          {/* Player column */}
+          <div className="flex min-w-0 flex-col gap-4">
+            <div>
+              <div className="relative aspect-video w-full overflow-hidden rounded-panel border border-edge bg-ink">
+                {/* YouTube owns everything inside this div; React never renders into it. */}
+                <div
+                  ref={mountRef}
+                  className={`absolute inset-0 ${timed ? "" : "hidden"}`}
+                />
+                {liveMedia && (
+                  <LiveStageView
+                    api={stage}
+                    media={liveMedia}
+                    isAdmin={selfIsAdmin}
+                  />
+                )}
+                {!media && <EmptyStage canControl={perms.video} />}
+                {timed && needsGesture && (
+                  <button
+                    onClick={startPlayback}
+                    className="absolute inset-0 z-10 grid place-items-center bg-ink/80 backdrop-blur-sm transition"
+                  >
+                    <span className="flex flex-col items-center gap-4">
+                      <span className="grid h-20 w-20 place-items-center rounded-full bg-signal shadow-[0_0_50px_-8px_rgba(244,67,60,0.85)] transition hover:scale-105">
+                        <svg width={30} height={30} viewBox="0 0 24 24" fill="white">
+                          <path d="M8 5v14l11-7z" />
+                        </svg>
+                      </span>
+                      <span className="text-sm font-semibold">
+                        Tap to join the watch party
+                      </span>
+                      <span className="text-xs text-smoke">
+                        Your browser paused autoplay — this syncs you to everyone else
+                      </span>
+                    </span>
+                  </button>
+                )}
+                <ReactionOverlay />
+              </div>
+
+              {timed && (
+                <MomentsTimeline
+                  moments={moments}
+                  duration={duration}
+                  currentTime={getVideoTime}
+                  onSeek={seekTo}
+                />
+              )}
+
+              {(media || !connected) && (
+                <NowPlayingRow media={media}>
+                  <SyncStatus state={syncState} drift={sync.drift} />
+                </NowPlayingRow>
+              )}
+
+              <div className="flex flex-wrap items-center justify-between gap-2 px-1 pt-2.5">
+                <ReactionBar disabled={!perms.chat} />
+                {timed && (
+                  <VoteButtons
+                    canCall={canCallVote}
+                    hasNext={readyCount > 0}
+                    pollRunning={!!poll}
+                    onToast={showToast}
+                  />
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2 rounded-panel border border-edge bg-film p-3 sm:flex-row">
+              <input
+                value={urlInput}
+                onChange={(e) => setUrlInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key !== "Enter") return;
+                  if (perms.video) playNow();
+                  else addToQueue();
+                }}
+                disabled={!perms.video && !perms.chat}
+                placeholder={
+                  perms.video || perms.chat
+                    ? "Paste a YouTube link…"
+                    : "The host turned off your suggestions"
+                }
+                aria-label="YouTube link"
+                className="w-full min-w-0 rounded-card border border-edge bg-ink px-4 py-3 text-sm outline-none transition focus:border-signal/60 disabled:cursor-not-allowed disabled:opacity-60"
+              />
+              <div className="flex flex-wrap gap-2 sm:flex-nowrap">
+                <button
+                  onClick={playNow}
+                  disabled={!perms.video || !hasLink}
+                  title={
+                    perms.video
+                      ? "Start this video for everyone now"
+                      : "Only the host can change the video"
+                  }
+                  className="flex-1 whitespace-nowrap rounded-card bg-signal px-4 py-3 text-sm font-semibold transition hover:bg-signal-hot active:scale-95 disabled:pointer-events-none disabled:opacity-40 sm:flex-none"
+                >
+                  Play now
+                </button>
+                <button
+                  onClick={addToQueue}
+                  disabled={!perms.chat || !hasLink || adding}
+                  title="Add it to Up next"
+                  className="flex-1 whitespace-nowrap rounded-card border border-edge bg-bone/5 px-4 py-3 text-sm font-medium transition hover:bg-bone/10 active:scale-95 disabled:pointer-events-none disabled:opacity-40 sm:flex-none"
+                >
+                  Add to queue
+                </button>
+                {perms.video && readyCount > 0 && (
+                  <button
+                    onClick={skip}
+                    title="Play the next video in Up next"
+                    className="whitespace-nowrap rounded-card border border-edge bg-bone/5 px-4 py-3 text-sm font-medium transition hover:bg-bone/10 active:scale-95"
+                  >
+                    Skip
+                  </button>
+                )}
+                {!liveMedia && (
+                  <button
+                    onClick={resync}
+                    title="Snap to the room's current position"
+                    className="whitespace-nowrap rounded-card border border-edge bg-bone/5 px-4 py-3 text-sm font-medium transition hover:bg-bone/10 active:scale-95"
+                  >
+                    Resync
+                  </button>
+                )}
+                <ShareMenu api={stage} canShare={perms.video} />
+              </div>
+            </div>
+
+            <CallPanel
+              call={call}
+              users={users}
+              selfId={selfId}
+              canCall={perms.call}
+            />
+          </div>
+
+          <SidePanel
+            users={users}
+            selfId={selfId}
+            selfBrowser={selfBrowser}
+            hostId={hostId}
+            settings={settings}
+            selfIsAdmin={selfIsAdmin}
+            canRunRoom={canRunRoom}
+            perms={perms}
+            messages={messages}
+            queue={queue}
+            media={media}
+            pinned={pinned}
+            poll={poll}
+            lastClosed={lastClosed}
+            serverNow={serverNow}
+            getVideoTime={getVideoTime}
+            onSeek={seekTo}
+            onNewPoll={() => setComposerOpen(true)}
+            onToast={showToast}
+          />
         </div>
+
+        {selfIsAdmin && (
+          <PollComposer
+            open={composerOpen}
+            onClose={() => setComposerOpen(false)}
+            queue={queue}
+            onToast={showToast}
+          />
+        )}
+
+        {toast && (
+          <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full border border-edge bg-film-2/95 px-5 py-2.5 text-sm shadow-xl backdrop-blur">
+            {toast}
+          </div>
+        )}
+      </div>
+      {passwordGate && (
+        <PasswordGate
+          code={code}
+          wrong={passwordGate.wrong}
+          limited={passwordGate.limited}
+          checking={passwordGate.checking}
+          connected={connected}
+          onSubmit={submitPassword}
+        />
       )}
-    </div>
+    </>
   );
 }
 
-function labelFor(type: PlayerAction["type"]) {
-  switch (type) {
-    case "play":
-      return "pressed play";
-    case "pause":
-      return "paused";
-    case "seek":
-      return "skipped ahead";
-    case "load":
-      return "changed the video";
-  }
+// Slim row under the player: what's on, and how we're doing against the room.
+function NowPlayingRow({
+  media,
+  children,
+}: {
+  media: Media | null;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-1 pt-2.5">
+      <div className="min-w-0">
+        {media?.kind === "live" ? (
+          <>
+            <p className="truncate text-sm font-semibold text-bone">
+              {media.title || "Live share"}
+            </p>
+            <p className="truncate text-xs text-smoke">Live share by {media.by}</p>
+          </>
+        ) : media?.title ? (
+          <>
+            <p className="truncate text-sm font-semibold text-bone">
+              {media.title}
+            </p>
+            {media.author && (
+              <p className="truncate text-xs text-smoke">{media.author}</p>
+            )}
+          </>
+        ) : media ? (
+          // No title (yet, or the lookup failed): the id still says what it is.
+          <p className="truncate font-mono text-xs text-dim">youtu.be/{media.id}</p>
+        ) : null}
+      </div>
+      {children}
+    </div>
+  );
 }
 
 function RoomHeader({
@@ -546,7 +742,7 @@ function RoomHeader({
   );
 }
 
-function EmptyStage() {
+function EmptyStage({ canControl }: { canControl: boolean }) {
   return (
     <div className="grid h-full place-items-center bg-[radial-gradient(60%_60%_at_50%_40%,rgba(244,67,60,0.12),transparent_70%)] text-center">
       <div className="px-6">
@@ -557,35 +753,69 @@ function EmptyStage() {
           Nothing playing yet
         </h2>
         <p className="mt-2 text-sm text-smoke">
-          Paste a YouTube link below and it starts for everyone in the room.
+          {canControl
+            ? "Paste a YouTube link below and it starts for everyone in the room."
+            : "The host picks what plays. Sit tight — it starts for you automatically."}
         </p>
       </div>
     </div>
   );
 }
 
-type SideTab = "chat" | "people";
+type SideTab = "chat" | "queue" | "people";
 
 function SidePanel({
   users,
   selfId,
   selfBrowser,
   hostId,
-  locked,
+  settings,
+  selfIsAdmin,
+  canRunRoom,
+  perms,
   messages,
+  queue,
+  media,
+  pinned,
+  poll,
+  lastClosed,
+  serverNow,
+  getVideoTime,
+  onSeek,
+  onNewPoll,
+  onToast,
 }: {
   users: RoomUser[];
   selfId: string | null;
   selfBrowser: string | null;
   hostId: string | null;
-  locked: boolean;
+  settings: RoomSettings;
+  selfIsAdmin: boolean;
+  canRunRoom: boolean;
+  perms: Perms;
   messages: ChatMessage[];
+  queue: QueueState;
+  media: Media | null;
+  pinned: ChatMessage | null;
+  poll: Poll | null;
+  lastClosed: PollClosed | null;
+  serverNow: () => number;
+  getVideoTime: () => number | null;
+  onSeek: (t: number) => void;
+  onNewPoll: () => void;
+  onToast: (msg: string) => void;
 }) {
   const [tab, setTab] = useState<SideTab>("chat");
-  const isHost = !!selfId && selfId === hostId;
+  const locked = settings.locked;
+  const ready = queue.items.filter((q) => q.status === "ready").length;
+  // Suggestions waiting on a decision — only the people who decide see them.
+  const pending = selfIsAdmin
+    ? queue.items.filter((q) => q.status === "pending").length
+    : 0;
   const tabs: { id: SideTab; label: string; count?: number }[] = [
     { id: "chat", label: "Chat" },
-    { id: "people", label: isHost ? "People · Manage" : "People", count: users.length },
+    { id: "queue", label: "Up next", count: ready },
+    { id: "people", label: "People", count: users.length },
   ];
 
   return (
@@ -597,7 +827,7 @@ function SidePanel({
             role="tab"
             aria-selected={tab === t.id}
             onClick={() => setTab(t.id)}
-            className={`-mb-px flex items-center gap-1.5 border-b-2 px-3 pb-2.5 pt-1 text-sm font-semibold transition ${
+            className={`-mb-px flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-2.5 pb-2.5 pt-1 text-sm font-semibold transition ${
               tab === t.id
                 ? "border-signal text-bone"
                 : "border-transparent text-smoke hover:text-bone"
@@ -609,24 +839,88 @@ function SidePanel({
                 {t.count}
               </span>
             )}
+            {t.id === "queue" && pending > 0 && (
+              <span
+                title={`${pending} waiting for approval`}
+                className="rounded-full bg-tungsten/15 px-1.5 text-[11px] font-semibold tabular-nums text-tungsten"
+              >
+                <span className="sr-only">, waiting for approval: </span>
+                {pending}
+              </span>
+            )}
             {t.id === "people" && locked && (
               <Icon name="lock" size={12} className="text-tungsten" />
             )}
           </button>
         ))}
+        {selfIsAdmin && (
+          <button
+            onClick={onNewPoll}
+            disabled={!!poll}
+            title={poll ? "A poll is already running" : "Ask the room something"}
+            aria-label="New poll"
+            className="mb-1.5 ml-auto flex shrink-0 items-center whitespace-nowrap gap-1.5 self-center rounded-full border border-edge bg-bone/5 px-2.5 py-1 text-xs font-semibold text-smoke transition hover:bg-bone/10 hover:text-bone active:scale-95 disabled:pointer-events-none disabled:opacity-40"
+          >
+            <svg
+              width={12}
+              height={12}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              aria-hidden
+            >
+              <path d="M5 20V12M12 20V5M19 20v-5" />
+            </svg>
+            Poll
+          </button>
+        )}
       </div>
-      {tab === "chat" ? (
+      {tab === "chat" && (
         <Chat
           messages={messages}
-          onSend={(t) => getSocket().emit("chat:message", { text: t })}
+          pinned={pinned}
+          selfBrowser={selfBrowser}
+          canChat={perms.chat}
+          isAdmin={selfIsAdmin}
+          getVideoTime={getVideoTime}
+          onSeek={onSeek}
+          onToast={onToast}
+          header={
+            <PollCard
+              poll={poll}
+              lastClosed={lastClosed}
+              selfBrowser={selfBrowser}
+              isAdmin={selfIsAdmin}
+              serverNow={serverNow}
+              onToast={onToast}
+            />
+          }
         />
-      ) : (
+      )}
+      {tab === "queue" && (
+        <QueuePanel
+          queue={queue}
+          media={media}
+          settings={settings}
+          selfBrowser={selfBrowser}
+          canControl={perms.video}
+          canSuggest={perms.chat}
+          isAdmin={selfIsAdmin}
+          canRunRoom={canRunRoom}
+          onToast={onToast}
+          onStartPoll={poll ? undefined : onNewPoll}
+        />
+      )}
+      {tab === "people" && (
         <PeoplePanel
           users={users}
           selfId={selfId}
           selfBrowser={selfBrowser}
           hostId={hostId}
-          locked={locked}
+          settings={settings}
+          selfIsAdmin={selfIsAdmin}
         />
       )}
     </div>
@@ -649,6 +943,19 @@ const CLOSED_COPY: Record<
     title: "This room has ended",
     body: "The host closed the room for everyone. Start your own or find another in the lobby.",
     hostBody: "You ended the room — everyone has been sent out.",
+  },
+  full: {
+    title: "This room is full",
+    body: "It has hit its limit of people. Try again later or start your own.",
+  },
+  invalid: {
+    title: "That room link isn't valid",
+    body: "Check the code and try again, or start a new room.",
+  },
+  // Normally handled by the password form; here for completeness.
+  password: {
+    title: "This room is protected",
+    body: "It needs a password to join. Ask the host for it, then try the link again.",
   },
 };
 
@@ -696,81 +1003,94 @@ function RoomClosed({
   );
 }
 
-function Chat({
-  messages,
-  onSend,
+function PasswordGate({
+  code,
+  wrong,
+  limited,
+  checking,
+  connected,
+  onSubmit,
 }: {
-  messages: ChatMessage[];
-  onSend: (text: string) => void;
+  code: string;
+  wrong: boolean;
+  limited: boolean;
+  checking: boolean;
+  connected: boolean;
+  onSubmit: (password: string) => void;
 }) {
-  const [text, setText] = useState("");
-  const endRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  function send() {
-    const t = text.trim();
-    if (!t) return;
-    onSend(t);
-    setText("");
-  }
+  const [value, setValue] = useState("");
+  const busy = checking;
+  const error = limited
+    ? "Too many attempts — wait a minute and try again"
+    : wrong
+      ? "Wrong password"
+      : null;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
-        {messages.length === 0 && (
-          <p className="mt-6 text-center text-sm text-faint">
-            No messages yet. Whatever you type shows up for everyone instantly.
-          </p>
-        )}
-        {messages.map((m) =>
-          m.system ? (
-            <p
-              key={m.id}
-              className="text-center text-xs italic text-faint"
-            >
-              {m.text}
-            </p>
-          ) : (
-            <div key={m.id} className="flex items-start gap-2.5">
-              <span
-                className="mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full text-xs font-bold text-black"
-                style={{ background: m.color }}
-              >
-                {m.name?.[0]?.toUpperCase()}
-              </span>
-              <div className="min-w-0">
-                <span
-                  className="text-xs font-semibold"
-                  style={{ color: m.color }}
-                >
-                  {m.name}
-                </span>
-                <p className="break-words text-sm text-bone/90">{m.text}</p>
-              </div>
-            </div>
-          )
-        )}
-        <div ref={endRef} />
-      </div>
-      <div className="flex gap-2 border-t border-edge p-3">
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
-          placeholder="Message the room…"
-          maxLength={500}
-          className="w-full rounded-card border border-edge bg-ink px-4 py-2.5 text-sm outline-none transition focus:border-signal/60"
-        />
-        <button
-          onClick={send}
-          className="rounded-card bg-signal px-4 py-2.5 text-sm font-semibold transition hover:bg-signal-hot active:scale-95"
+    <div className="fixed inset-0 z-[60] flex flex-col overflow-y-auto bg-ink">
+      <header className="border-b border-edge">
+        <div className="mx-auto flex max-w-7xl items-center px-4 py-3">
+          <Logo size="sm" />
+        </div>
+      </header>
+      <main className="grid flex-1 place-items-center px-4">
+        <form
+          className="w-full max-w-sm text-center"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!value || busy) return;
+            onSubmit(value);
+          }}
         >
-          Send
-        </button>
-      </div>
+          <div className="mx-auto grid h-16 w-16 place-items-center rounded-full border border-edge bg-film text-dim">
+            <Icon name="lock" size={26} />
+          </div>
+          <p className="mt-6 font-mono text-sm tracking-wider text-smoke">{code}</p>
+          <h1 className="mt-1 font-display text-2xl font-bold">
+            This room is protected
+          </h1>
+          <p className="mt-3 text-sm text-smoke">
+            Enter the password the host shared with you.
+          </p>
+          <input
+            type="password"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            autoFocus
+            autoComplete="current-password"
+            maxLength={64}
+            aria-label="Room password"
+            aria-invalid={wrong && !limited}
+            aria-describedby={error ? "room-password-error" : undefined}
+            placeholder="Password"
+            className={`mt-6 w-full rounded-card border bg-ink px-4 py-3 text-sm outline-none transition focus:border-signal/60 ${
+              error ? "border-signal/60" : "border-edge"
+            }`}
+          />
+          {error && (
+            <p
+              id="room-password-error"
+              role="alert"
+              className="mt-2 text-left text-xs text-signal-hot"
+            >
+              {error}
+            </p>
+          )}
+          <button
+            type="submit"
+            disabled={!value || busy}
+            className="mt-4 w-full rounded-card bg-signal px-5 py-3 text-sm font-semibold transition hover:bg-signal-hot active:scale-95 disabled:pointer-events-none disabled:opacity-40"
+          >
+            {busy ? (connected ? "Joining…" : "Reconnecting…") : "Join"}
+          </button>
+          <Link
+            href="/lobby"
+            className="mt-4 inline-block text-sm text-smoke transition hover:text-bone"
+          >
+            Back to the lobby
+          </Link>
+        </form>
+      </main>
     </div>
   );
 }

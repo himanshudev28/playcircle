@@ -43,3 +43,9 @@ next-env.d.ts
 # local-only
 /.claude/settings.local.json
 /public/_shot.html
+
+# saved room state
+/.data
+
+# editor swap files
+*.swp

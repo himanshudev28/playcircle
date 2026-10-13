@@ -52,7 +52,12 @@ type Signal = {
   candidate?: RTCIceCandidateInit;
 };
 type Peer = { id: string; session: string };
-type JoinReply = { ok: boolean; session?: string; peers?: Peer[] };
+type JoinReply = {
+  ok: boolean;
+  reason?: "blocked";
+  session?: string;
+  peers?: Peer[];
+};
 
 export type CallApi = ReturnType<typeof useCall>;
 
@@ -353,7 +358,11 @@ export function useCall(onNotice: (msg: string) => void) {
         if (gen !== genRef.current) return;
         if (!res?.ok) {
           teardown();
-          noticeRef.current("Couldn't join the call — try again");
+          noticeRef.current(
+            res?.reason === "blocked"
+              ? "The host turned off calls for you"
+              : "Couldn't join the call — try again"
+          );
           return;
         }
         for (const p of res.peers || []) {
@@ -440,6 +449,10 @@ export function useCall(onNotice: (msg: string) => void) {
       publish({ ...stateRef.current, mic: false });
       noticeRef.current("The host muted your mic");
     };
+    // The host revoked our call access; the server already dropped the seat.
+    const onRevoked = () => {
+      if (inCallRef.current || joiningRef.current) teardown();
+    };
     // A dropped socket means the server already forgot our call seat.
     const onDisconnect = () => {
       if (inCallRef.current || joiningRef.current) {
@@ -451,11 +464,13 @@ export function useCall(onNotice: (msg: string) => void) {
     socket.on("call:signal", onSignal);
     socket.on("call:left", onLeft);
     socket.on("call:force-mute", onForceMute);
+    socket.on("call:revoked", onRevoked);
     socket.on("disconnect", onDisconnect);
     return () => {
       socket.off("call:signal", onSignal);
       socket.off("call:left", onLeft);
       socket.off("call:force-mute", onForceMute);
+      socket.off("call:revoked", onRevoked);
       socket.off("disconnect", onDisconnect);
     };
   }, [onSignal, publish, removePeer, teardown]);

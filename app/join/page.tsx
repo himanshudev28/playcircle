@@ -1,15 +1,32 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
 import { Logo } from "@/components/Logo";
 import { Icon } from "@/components/Icon";
 import { makeRoomCode } from "@/lib/youtube";
 
+// Reading the URL (`?next=` from an invite link) makes this part client-only,
+// so it sits in a Suspense boundary and the rest of the route can prerender.
 export default function JoinPage() {
+  return (
+    <Suspense fallback={<main className="min-h-dvh" />}>
+      <JoinForm />
+    </Suspense>
+  );
+}
+
+// `?next=PC-XXXX` arrives when someone opens a room link without a name yet.
+function inviteCode(raw: string | null): string | null {
+  const c = (raw || "").toUpperCase().replace(/[^A-Z0-9-]/g, "").slice(0, 16);
+  return c || null;
+}
+
+function JoinForm() {
   const router = useRouter();
+  const invite = inviteCode(useSearchParams().get("next"));
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [title, setTitle] = useState("");
@@ -50,8 +67,92 @@ export default function JoinPage() {
     router.push(`/room/${c.startsWith("PC-") ? c : `PC-${c}`}`);
   }
 
+  function joinInvite() {
+    if (!invite || !persistName()) return;
+    router.push(`/room/${invite}`);
+  }
+
   const field =
     "mt-2 w-full rounded-card border border-edge bg-ink px-4 py-3 text-bone placeholder:text-faint outline-none transition-colors focus:border-signal/60";
+
+  if (invite) {
+    return (
+      <main className="relative grid min-h-dvh place-items-center overflow-hidden px-5 py-16">
+        <div
+          className="pointer-events-none absolute inset-0 -z-10"
+          style={{
+            background:
+              "radial-gradient(90% 60% at 50% -10%, rgba(244,67,60,0.16), transparent 60%)",
+          }}
+        />
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
+          className="w-full max-w-md"
+        >
+          <div className="mb-8 flex justify-center">
+            <Logo size="lg" />
+          </div>
+
+          <div className="rounded-hero border border-edge bg-film/85 p-7 backdrop-blur-xl">
+            <p className="data text-signal">You&apos;re invited</p>
+            <h1 className="mt-2 font-display text-2xl font-extrabold text-bone">
+              Join the watch party
+            </h1>
+            <p className="mt-2 text-smoke">
+              Pick a name so people know who joined.
+            </p>
+
+            <div className="mt-6 flex items-center justify-between rounded-card border border-edge bg-ink px-4 py-3">
+              <span className="text-sm text-dim">Room</span>
+              <span className="font-mono tracking-widest text-bone">{invite}</span>
+            </div>
+
+            <label htmlFor="name" className="mt-5 block text-sm font-medium text-bone">
+              Display name
+            </label>
+            <input
+              id="name"
+              autoFocus
+              value={name}
+              onChange={(e) => {
+                setName(e.target.value);
+                setError("");
+              }}
+              onKeyDown={(e) => e.key === "Enter" && joinInvite()}
+              placeholder="e.g. Maya"
+              maxLength={24}
+              className={field}
+            />
+
+            <button
+              onClick={joinInvite}
+              className="mt-6 flex w-full items-center justify-center gap-2 rounded-card bg-signal px-5 py-3.5 font-semibold text-white shadow-[0_10px_40px_-12px_rgba(244,67,60,0.75)] transition-colors hover:bg-signal-hot active:scale-[0.98]"
+            >
+              Join room
+              <Icon name="arrowRight" size={18} />
+            </button>
+
+            {error && (
+              <p role="alert" className="mt-4 text-sm text-signal">
+                {error}
+              </p>
+            )}
+          </div>
+
+          <p className="mt-7 text-center text-sm">
+            <Link
+              href="/join"
+              className="text-smoke transition-colors hover:text-bone"
+            >
+              Start your own room instead
+            </Link>
+          </p>
+        </motion.div>
+      </main>
+    );
+  }
 
   return (
     <main className="relative grid min-h-dvh place-items-center overflow-hidden px-5 py-16">

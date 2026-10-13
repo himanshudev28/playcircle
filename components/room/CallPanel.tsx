@@ -9,10 +9,12 @@ export function CallPanel({
   call,
   users,
   selfId,
+  canCall,
 }: {
   call: CallApi;
   users: RoomUser[];
   selfId: string | null;
+  canCall: boolean;
 }) {
   const callers = users.filter((u) => u.call);
   const others = callers.filter((u) => u.id !== selfId);
@@ -40,7 +42,9 @@ export function CallPanel({
                 : "Voice & video"}
             </p>
             <p className="truncate text-xs text-smoke">
-              {callers.length > 0
+              {!canCall
+                ? "The host turned off calls for you."
+                : callers.length > 0
                 ? callers.map((u) => u.name).join(", ")
                 : "Talk face-to-face or voice-only while you watch."}
             </p>
@@ -49,7 +53,7 @@ export function CallPanel({
         <div className="flex gap-2">
           <button
             onClick={() => call.join(false)}
-            disabled={call.joining}
+            disabled={call.joining || !canCall}
             className="flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-card border border-edge bg-bone/5 px-4 py-2.5 text-sm font-medium transition hover:bg-bone/10 disabled:opacity-50 sm:flex-none"
           >
             <Icon name="mic" size={16} />
@@ -57,7 +61,7 @@ export function CallPanel({
           </button>
           <button
             onClick={() => call.join(true)}
-            disabled={call.joining}
+            disabled={call.joining || !canCall}
             className="flex flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-card bg-signal px-4 py-2.5 text-sm font-semibold transition hover:bg-signal-hot active:scale-95 disabled:opacity-50 sm:flex-none"
           >
             <Icon name="video" size={16} />
