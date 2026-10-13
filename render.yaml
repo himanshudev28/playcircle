@@ -3,9 +3,11 @@
 # next visit (~50 s); rooms live in memory, so a sleep or deploy resets them.
 services:
   - type: web
-    name: playcircle
+    name: playcircle-in
     runtime: node
     plan: free
+    # Closest free region to India (Oregon added ~200 ms to every sync).
+    region: singapore
     buildCommand: npm ci && npm run build
     startCommand: npm start
     healthCheckPath: /api/ice
