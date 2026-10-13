@@ -32,8 +32,8 @@ users join the same rooms and see the same things.
 
 ## Install on your phone
 
-You need Android 8 or newer. Sharing the whole screen needs Android 10+, and
-14+ adds the "single app / entire screen" choice.
+You need Android 8 or newer. Sharing the whole screen with sound needs Android
+10+.
 
 **Option A: copy the APK.** Copy
 `app/build/outputs/apk/release/app-release.apk` to the phone (Drive,
@@ -57,8 +57,9 @@ After installing:
 
 1. Open a room in the app. You need video control: the host, the room
    creator, or "Everyone can control" playback.
-2. **Share → Entire screen**, then tap **Start now** in Android's dialog. On
-   Android 14+, pick **Entire screen**.
+2. **Share → Entire screen**, then tap **Start** in Android's dialog. The
+   first time, also allow notifications (the Stop button) and the microphone
+   (for sound).
 3. Switch to any app. Everyone in the room sees your screen.
 4. Stop from the room page, the notification, or Android's status-bar chip.
    Locking the phone also stops it on Android 15+.
