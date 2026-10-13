@@ -103,7 +103,7 @@ class MainActivity : ComponentActivity() {
     private var pipSuppressed = false
 
     private val onShareState: (ShareState.Snapshot, String?) -> Unit = { s, msg ->
-        updatePipParams() // no call pop-up over your own screen share
+        updatePipParams() // a share starting or ending re-evaluates PiP
         val json = ShareState.toJson(s, msg)
         webView.evaluateJavascript(
             "window.dispatchEvent(new CustomEvent('playcircle-native',{detail:$json}))",
@@ -447,10 +447,11 @@ class MainActivity : ComponentActivity() {
         updatePipParams()
     }
 
-    /** In a call, not sharing your screen (the camera window would be in
-        the share), and not opening a screen of our own. */
-    private fun pipWanted() =
-        callPip && !pipSuppressed && ShareState.current.phase == ShareState.Phase.IDLE
+    /** In a call, and not opening a screen of our own. Also while sharing
+        your screen: without the PiP window the app is fully in the
+        background, Android cuts its camera and the call freezes. (The small
+        camera window does show up in the share.) */
+    private fun pipWanted() = callPip && !pipSuppressed
 
     private fun suppressPip() {
         pipSuppressed = true

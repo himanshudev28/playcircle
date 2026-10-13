@@ -88,6 +88,9 @@ Calls are the website's, so they work the same on PC and phone. On top:
   button or gesture) shrinks PlayCircle into Android's picture-in-picture
   window showing just the cameras. Tap it to come back. If it doesn't
   appear: Settings → Apps → PlayCircle → Picture-in-picture → Allow.
+  It also works while you share your screen, so the call keeps its camera
+  and sound while you're in another app — viewers see the small camera
+  window in your share.
 - **No echo:** while you're in a call, your voice goes out through the call
   only — the screen share's **My voice** switch reads "via the call" and
   stays off, so nobody hears you twice. The share's microphone runs Android's
