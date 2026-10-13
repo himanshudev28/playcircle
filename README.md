@@ -290,7 +290,9 @@ Every handler runs through `safe()` in [`server/limits.js`](server/limits.js): p
 
 ### Hosting
 
-PlayCircle is a long-running Node process (Next.js and Socket.IO in one server), so it needs a host that keeps it running: **Render, Railway, Fly.io, or a VPS**. Vercel can't run it. Give it a **persistent disk** for the room save file; on a host with an ephemeral disk, rooms won't survive a redeploy.
+PlayCircle is a long-running Node process (Next.js and Socket.IO in one server), so it needs a host that keeps it running: **Render, Railway, Fly.io, or a VPS**. Vercel can't run the realtime server; it can still serve the pages if `NEXT_PUBLIC_SOCKET_URL` points at a server running elsewhere.
+
+The repo includes a Render Blueprint ([`render.yaml`](render.yaml)) for one free web service. It's live at **https://playcircle-174u.onrender.com**. Free instances sleep after about 15 idle minutes and take about 50 s to wake. Give it a **persistent disk** for the room save file; on a host with an ephemeral disk, rooms won't survive a redeploy.
 
 If it runs behind a reverse proxy (as it does on most of these hosts), set `TRUST_PROXY=1`. Otherwise every visitor shares the proxy's address and one person's wrong password guesses use up everyone's per-address allowance. Leave it unset when nothing sits in front of the server, or clients could fake their address with an `X-Forwarded-For` header.
 
@@ -300,19 +302,28 @@ If it runs behind a reverse proxy (as it does on most of these hosts), set `TRUS
 |---|---|
 | `PORT` / `HOST` | Server bind address (default `localhost:3000`) |
 | `NEXT_PUBLIC_SITE_URL` | Canonical URL for metadata, the sitemap, and OG images |
-| `NEXT_PUBLIC_ICE_SERVERS` | JSON array of STUN/TURN servers for calls and shares |
+| `TURN_URLS` / `TURN_USERNAME` / `TURN_CREDENTIAL` | A TURN relay with a fixed login (e.g. ExpressTURN's free tier), served to browsers and the Android app by `/api/ice` |
+| `ICE_SERVERS` | JSON array of extra STUN/TURN servers, server-side |
+| `NEXT_PUBLIC_ICE_SERVERS` | Older build-time version of `ICE_SERVERS` (visible in the page source) |
+| `NEXT_PUBLIC_SOCKET_URL` | Realtime server URL when the pages are hosted elsewhere (e.g. Vercel → Render) |
 | `DATA_DIR` | Where the room save file lives (default `.data/`, saved as `rooms.json`) |
 | `PERSIST` | Set to `0` to turn off saving rooms to disk |
 | `TRUST_PROXY` | Set to `1` behind a reverse proxy, so password rate limits use the real client address from `X-Forwarded-For` |
 
 ### Calls and shares: STUN, TURN, and scale
 
-Calls and shares use Google's public STUN servers, which work on most home networks. Peers behind strict NATs or corporate firewalls need a TURN relay:
+Calls and shares use Google's public STUN servers, which work on most home networks. Peers on different networks, mobile data, or behind strict NATs need a TURN relay. Set it on the server, and `/api/ice` hands it to browsers and the Android app:
 
 ```bash
-# .env.local
-NEXT_PUBLIC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turn:turn.example.com:3478","username":"u","credential":"p"}]'
+# .env.local (or the host's dashboard)
+TURN_URLS=turn:free.expressturn.com:3478?transport=udp,turn:free.expressturn.com:3478?transport=tcp
+TURN_USERNAME=…
+TURN_CREDENTIAL=…
 ```
+
+### Android app
+
+Phone browsers can't share the screen. The Android app in [`android/`](android/README.md) shows the site in a WebView, so it has every feature, and adds native whole-screen sharing. See its README to install the APK.
 
 > [!NOTE]
 > Browsers allow camera and mic access only on **HTTPS or `localhost`**. To test from a phone on your LAN, use an HTTPS tunnel such as `cloudflared` or `ngrok`. A call mesh works for about 6 people and a share for up to 8 viewers; past that, move to an SFU such as LiveKit or mediasoup.

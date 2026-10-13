@@ -1,5 +1,13 @@
 # Sharing a whole phone screen (Android, personal use)
 
+> **Status (2026-10-13): built.** The app lives in [`android/`](android/README.md).
+> It went a different way from the plan below: a **Kotlin app** that shows the
+> website in a WebView (so it has every web feature) and does the screen share
+> natively, on a hidden "companion" connection to the room. Optional server
+> changes 1–4 below are done (companion joins replace `joinOnly`; `/api/ice`
+> serves the ICE list; the share menu points phone browsers to the app). The
+> rest of this file is the original research, kept for reference.
+
 Plan written 2026-10-13. The scope is **Android only, for personal use**,
 installed as a sideloaded APK. There is no Play Store and no iPhone. iOS is
 out of scope; it would need a ReplayKit broadcast extension and an Apple

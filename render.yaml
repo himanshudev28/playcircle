@@ -12,6 +12,9 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
+      # Render sits behind a proxy: rate limits need the real client address.
+      - key: TRUST_PROXY
+        value: "1"
       # Canonical links / social previews (read at build time).
       - key: NEXT_PUBLIC_SITE_URL
         value: https://playcircle-174u.onrender.com
