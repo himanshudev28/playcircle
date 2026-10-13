@@ -23,10 +23,11 @@ object ShareState {
     var current: Snapshot = IDLE
         private set
 
-    /** Set the state; `message` is shown to the person as a toast. */
-    fun update(next: Snapshot, message: String? = null) {
+    /** Set the state; `message` is shown to the person as a toast. `force`
+        re-sends an unchanged state (the page may think it's still starting). */
+    fun update(next: Snapshot, message: String? = null, force: Boolean = false) {
         main.post {
-            if (next == current && message == null) return@post
+            if (next == current && message == null && !force) return@post
             current = next
             for (fn in listeners.toList()) fn(next, message)
         }

@@ -38,6 +38,8 @@ function bridge(): Bridge | null {
 
 let state: NativeShareState = IDLE;
 let started = false;
+/** Bumped by a cancel, so a start still fetching ICE servers is dropped. */
+let startSeq = 0;
 const listeners = new Set<() => void>();
 const toastListeners = new Set<(msg: string) => void>();
 
@@ -126,7 +128,9 @@ export async function startNativeShare(opts: {
   // Starting right away: the stage is about to go live under the app's
   // connection, and this page must not try to watch it.
   set({ phase: "starting", streamId: null, viewers: 0 });
+  const seq = ++startSeq;
   const iceServers = await prefetchIce();
+  if (seq !== startSeq) return; // cancelled meanwhile
   // The app connects to the realtime server itself — this origin, or the
   // separate one when pages and sockets are hosted apart.
   const server = REALTIME_URL || window.location.origin;
@@ -134,6 +138,9 @@ export async function startNativeShare(opts: {
 }
 
 export function stopNativeShare() {
+  // Cancelled before the app was even asked: settle it here.
+  startSeq++;
+  if (state.phase === "starting" && !state.streamId) set(IDLE);
   bridge()?.stopScreenShare();
 }
 

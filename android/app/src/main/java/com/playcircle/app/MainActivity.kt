@@ -10,6 +10,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -111,7 +112,7 @@ class MainActivity : ComponentActivity() {
             if (result.resultCode == Activity.RESULT_OK && data != null && json != null) {
                 ScreenShareService.start(this, data, json)
             } else {
-                ShareState.update(ShareState.IDLE, "Screen sharing was cancelled")
+                ShareState.update(ShareState.IDLE, "Screen sharing was cancelled", force = true)
             }
         }
 
@@ -177,9 +178,10 @@ class MainActivity : ComponentActivity() {
             override fun handleOnBackPressed() {
                 when {
                     fullscreenView != null -> fullscreenCallback?.onCustomViewHidden()
-                    webView.canGoBack() -> webView.goBack()
-                    // Sharing: keep the room open behind other apps.
+                    // Sharing: keep the room open behind other apps — going
+                    // back would leave the room and end the share.
                     ShareState.current.phase != ShareState.Phase.IDLE -> moveTaskToBack(true)
+                    webView.canGoBack() -> webView.goBack()
                     else -> finish()
                 }
             }
@@ -345,14 +347,18 @@ class MainActivity : ComponentActivity() {
     /* ------------------------------------------------------- screen share */
 
     fun startScreenShare(json: String) {
-        if (!isOurs(webView.url)) return
+        if (!isOurs(webView.url)) {
+            ShareState.update(ShareState.IDLE, force = true)
+            return
+        }
         if (ScreenShareService.running) {
             ShareState.message("You're already sharing your screen")
             return
         }
         val req = ShareRequest.parse(json)
-        if (req == null) {
-            ShareState.update(ShareState.IDLE, "Couldn't start screen sharing")
+        // Only ever to the server this app is set up for.
+        if (req == null || origin(req.server) != origin(server)) {
+            ShareState.update(ShareState.IDLE, "Couldn't start screen sharing", force = true)
             return
         }
         pendingShare = json
@@ -368,8 +374,15 @@ class MainActivity : ComponentActivity() {
 
     private fun askForProjection() {
         val mpm = getSystemService(MediaProjectionManager::class.java)
+        // The whole screen, not "a single app": sharing has to keep going
+        // when you switch apps.
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            mpm.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+        } else {
+            mpm.createScreenCaptureIntent()
+        }
         try {
-            projectionLauncher.launch(mpm.createScreenCaptureIntent())
+            projectionLauncher.launch(intent)
         } catch (_: ActivityNotFoundException) {
             pendingShare = null
             ShareState.update(ShareState.IDLE, "This phone can't share its screen")

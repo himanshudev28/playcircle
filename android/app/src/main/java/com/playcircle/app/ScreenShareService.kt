@@ -48,7 +48,7 @@ class ScreenShareService : Service() {
 
         fun stop(ctx: Context) {
             if (!running) {
-                ShareState.update(ShareState.IDLE)
+                ShareState.update(ShareState.IDLE, force = true)
                 return
             }
             ctx.startService(Intent(ctx, ScreenShareService::class.java).setAction(ACTION_STOP))
@@ -93,6 +93,8 @@ class ScreenShareService : Service() {
     }
 
     private fun begin(intent: Intent) {
+        val req = intent.getStringExtra(EXTRA_REQUEST)?.let { ShareRequest.parse(it) }
+        if (presenter == null && req != null) roomCode = req.code
         // Foreground first: Android 14+ refuses the projection otherwise.
         val starting = ShareState.Snapshot(ShareState.Phase.STARTING, null, 0)
         ServiceCompat.startForeground(
@@ -109,19 +111,23 @@ class ScreenShareService : Service() {
         if (presenter != null) return // already sharing
 
         val data = IntentCompat.getParcelableExtra(intent, EXTRA_DATA, Intent::class.java)
-        val req = intent.getStringExtra(EXTRA_REQUEST)?.let { ShareRequest.parse(it) }
         if (data == null || req == null) {
             ShareState.update(ShareState.IDLE, "Couldn't start screen sharing")
             finish()
             return
         }
-        roomCode = req.code
         presenter = StagePresenter(applicationContext, req, data) {
             main.post {
                 presenter = null
                 finish()
             }
         }.also { it.start() }
+    }
+
+    // Swiped away from recents: the room page is gone, so the share goes too.
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        presenter?.stop("Screen sharing stopped")
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {

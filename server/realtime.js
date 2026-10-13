@@ -40,6 +40,9 @@ const DEFAULTS = {
   // A refresh is a disconnect + reconnect; only announce "left" if the
   // person is still gone after this long.
   leaveAnnounceMs: 5_000,
+  // A companion (the Android app's share link) whose person has left gets
+  // this long for them to come back before it's sent out too.
+  companionGraceMs: 20_000,
   // An ended room's code stays dead this long so a reload can't recreate it.
   endedTtlMs: 10 * 60_000,
   // Rooms restored from disk wait this long for someone to come back.
@@ -233,6 +236,7 @@ function attachRealtime(io, options = {}) {
     const actor = room.users.get(actorId);
     const target = room.users.get(targetId);
     if (!actor || !target || !isAdmin(room, actorId)) return false;
+    if (target.companion) return false;
     if (actor.clientId === target.clientId) return false;
     if (target.clientId === room.ownerClientId) return false;
     return true;
@@ -562,6 +566,8 @@ function attachRealtime(io, options = {}) {
       return;
     }
 
+    if (user && !user.companion) dropOrphanCompanions(room, user.clientId);
+
     if (user && announce && !user.companion) {
       const { clientId, name } = user;
       clearTimeout(room.pendingLeaves.get(clientId));
@@ -579,6 +585,23 @@ function attachRealtime(io, options = {}) {
     }
     broadcastUsers(room);
     if (room.isPublic) broadcastLobby();
+  }
+
+  // A companion can't stay in a room its person has left (back button, app
+  // swiped away): once they've been gone a while, it goes too — ending
+  // its share and letting an empty room close.
+  function dropOrphanCompanions(room, clientId) {
+    setTimeout(() => {
+      if (rooms.get(room.code) !== room) return;
+      if (people(room).some(([, u]) => u.clientId === clientId)) return;
+      for (const [sid, u] of [...room.users.entries()]) {
+        if (!u.companion || u.clientId !== clientId) continue;
+        const s = io.sockets.sockets.get(sid);
+        if (!s) continue;
+        s.emit("room:denied", { reason: "missing" });
+        detach(s, { announce: false });
+      }
+    }, opts.companionGraceMs);
   }
 
   // Drop every call seat held by one browser (e.g. calls revoked).
@@ -1071,6 +1094,19 @@ function attachRealtime(io, options = {}) {
       clearTimeout(room.pendingLeaves.get(cid));
       room.pendingLeaves.delete(cid);
 
+      // One companion per person: a new one (the app reconnected after a
+      // network switch) replaces a stale one the server hasn't noticed is
+      // dead yet, so its share ends now and the new link can take over.
+      if (companion) {
+        for (const [sid, u] of [...room.users.entries()]) {
+          if (!u.companion || u.clientId !== cid || sid === socket.id) continue;
+          const old = io.sockets.sockets.get(sid);
+          if (!old) continue;
+          detach(old, { announce: false });
+          old.disconnect(true);
+        }
+      }
+
       socket.data.code = code;
       socket.join(code);
       let color = room.colors.get(cid);
@@ -1150,7 +1186,7 @@ function attachRealtime(io, options = {}) {
       const room = roomOf(socket);
       if (!room || !isAdmin(room, socket.id) || targetId === socket.id) return;
       const target = room.users.get(targetId);
-      if (!target) return;
+      if (!target || target.companion) return;
       // Handing the crown back to the creator is always fine.
       if (!isOwnerId(room, targetId) && !canTarget(room, socket.id, targetId)) {
         return;

@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
   type Dispatch,
@@ -1627,6 +1628,17 @@ export function useLiveStage({
 
   useEffect(() => engine.attach(getSocket()), [engine]);
   useEffect(() => onNativeToast(onToast), [onToast]);
+  // Leaving the room inside the app ends the phone's share with it.
+  const nativeLive = useRef(false);
+  useEffect(() => {
+    nativeLive.current = native;
+  }, [native]);
+  useEffect(
+    () => () => {
+      if (nativeLive.current) stopNativeShare();
+    },
+    []
+  );
 
   const liveId = media?.kind === "live" ? media.streamId : null;
   const livePresenter = media?.kind === "live" ? media.presenter : null;

@@ -22,7 +22,6 @@ import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpParameters
 import org.webrtc.RtpTransceiver
-import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
@@ -67,6 +66,9 @@ class StagePresenter(
         const val ACK_TIMEOUT_MS = 8_000L
         /** Give up on a dropped connection after this long. */
         const val RECONNECT_GIVE_UP_MS = 45_000L
+        /** After a drop, the room page may rejoin after us: keep asking. */
+        const val MISSING_RETRY_MS = 3_000L
+        const val MISSING_RETRIES = 10
 
         /** Short side of the picture for each level. Phones upload once per
             viewer, so "auto" means 720p here rather than full resolution. */
@@ -99,17 +101,21 @@ class StagePresenter(
 
     private var egl: EglBase? = null
     private var factory: PeerConnectionFactory? = null
-    private var capturer: ScreenCapturerAndroid? = null
+    private var capturer: ScreenCapturer? = null
     private var textureHelper: SurfaceTextureHelper? = null
     private var source: VideoSource? = null
     private var track: VideoTrack? = null
     private var captureShort = 720
+    private var captureSize = 0 to 0
 
     private var socket: Socket? = null
     private var streamId: String? = null
     private var starting = false
     private var everStarted = false
     private var giveUp: ScheduledFuture<*>? = null
+    /** Bumped on every (re)connect: replies from an older one are void. */
+    private var connGen = 0
+    private var missingRetries = 0
 
     private val peers = HashMap<String, Peer>()
     private val prefs = HashMap<String, String>()
@@ -175,7 +181,7 @@ class StagePresenter(
             .createPeerConnectionFactory()
             .also { this.factory = it }
 
-        val capturer = ScreenCapturerAndroid(projectionData, object : MediaProjection.Callback() {
+        val capturer = ScreenCapturer(projectionData, object : MediaProjection.Callback() {
             // The system ended it: the status-bar chip, the screen locking,
             // another app taking the projection.
             override fun onStop() {
@@ -188,6 +194,7 @@ class StagePresenter(
         val source = factory.createVideoSource(/* isScreencast = */ true).also { this.source = it }
         capturer.initialize(helper, context, source.capturerObserver)
         val (w, h) = captureSize()
+        captureSize = w to h
         capturer.startCapture(w, h, FPS)
         track = factory.createVideoTrack("screen", source)
     }
@@ -211,7 +218,10 @@ class StagePresenter(
 
     private fun resizeCapture() {
         val c = capturer ?: return
-        val (w, h) = captureSize()
+        val size = captureSize()
+        if (size == captureSize) return // e.g. dark mode, font scale
+        captureSize = size
+        val (w, h) = size
         try {
             c.changeCaptureFormat(w, h, FPS)
         } catch (e: Exception) {
@@ -248,6 +258,12 @@ class StagePresenter(
     private fun onConnect() {
         giveUp?.cancel(false)
         giveUp = null
+        connGen++
+        missingRetries = 0
+        join()
+    }
+
+    private fun join() {
         socket?.emit("room:join", JSONObject().apply {
             put("code", req.code)
             put("name", req.name)
@@ -285,6 +301,7 @@ class StagePresenter(
     }
 
     private fun onState(snap: JSONObject?) {
+        missingRetries = 0
         val media = snap?.optJSONObject("media")
         val onStage = media?.optString("streamId")?.takeIf { media.optString("kind") == "live" }
         val mine = streamId
@@ -306,6 +323,10 @@ class StagePresenter(
 
     private fun claimStage() {
         val s = socket ?: return
+        // Never queue a claim for later: on reconnect it would reach the
+        // server before our room:join and be refused.
+        if (!s.connected()) return
+        val gen = connGen
         starting = true
         val payload = JSONObject().apply {
             put("source", "screen")
@@ -315,6 +336,7 @@ class StagePresenter(
             override fun onSuccess(vararg args: Any?) {
                 onThread {
                     starting = false
+                    if (gen != connGen) return@onThread // a dead connection's reply
                     val reply = args.firstOrNull() as? JSONObject
                     if (reply?.optBoolean("ok") == true) {
                         everStarted = true
@@ -327,9 +349,12 @@ class StagePresenter(
                 }
             }
 
+            // Also called for every pending reply when the connection drops;
+            // then the reconnect claims again instead.
             override fun onTimeout() {
                 onThread {
                     starting = false
+                    if (gen != connGen || socket?.connected() != true) return@onThread
                     end("The server didn't answer — try sharing again", tellServer = false)
                 }
             }
@@ -337,8 +362,22 @@ class StagePresenter(
     }
 
     private fun onDenied(d: JSONObject?) {
-        val msg = when (d?.optString("reason")) {
-            "missing" -> "Open the room first, then share from it"
+        val reason = d?.optString("reason")
+        // Back after a drop, but the room page hasn't rejoined yet (or is
+        // only briefly away): ask again for a while before giving up.
+        if (reason == "missing" && everStarted && missingRetries < MISSING_RETRIES) {
+            missingRetries++
+            streamId = null
+            closeAllPeers()
+            ShareState.update(ShareState.Snapshot(ShareState.Phase.STARTING, null, 0))
+            exec.schedule({
+                if (!ended && socket?.connected() == true) join()
+            }, MISSING_RETRY_MS, TimeUnit.MILLISECONDS)
+            return
+        }
+        val msg = when (reason) {
+            "missing" -> if (everStarted) "You left the room — screen sharing stopped"
+                else "Open the room first, then share from it"
             "removed" -> "You were removed from the room"
             "ended" -> "The room has ended"
             "locked" -> "The room is locked"

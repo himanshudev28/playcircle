@@ -23,6 +23,7 @@ const FAST = {
   tickMs: 100,
   hostGraceMs: 200,
   leaveAnnounceMs: 50,
+  companionGraceMs: 200,
   emptyRoomTtlMs: 200,
   restoredTtlMs: 5_000,
   saveEveryMs: 60_000,
@@ -1606,6 +1607,62 @@ describe("realtime", () => {
       assert.equal(await crowned, viewer.id);
       // Now host, the viewer's companion borrows the right to present.
       assert.equal((await ack(app, "stage:start", { source: "screen" })).ok, true);
+    });
+
+    test("can't be handed the crown", async () => {
+      const { code, host } = await pair();
+      const app = await srv.connect();
+      await join(app, { code, name: "Viewer", clientId: `v-${code}`, companion: true });
+      host.emit("host:transfer", { targetId: app.id });
+      await ping(host);
+      assert.equal(srv.rt.rooms.get(code).hostId, host.id);
+    });
+
+    test("goes once its person has left, ending the share and freeing the room", async () => {
+      const { code, host, viewer } = await pair();
+      const app = await srv.connect();
+      await join(app, { code, name: "Viewer", clientId: `v-${code}`, companion: true });
+      host.emit("host:playback", { mode: "everyone" });
+      await ping(host);
+      const { streamId } = await ack(app, "stage:start", { source: "screen" });
+      assert.equal(typeof streamId, "string");
+
+      const sentOut = once(app, "room:denied", (d) => d.reason === "missing", 2000);
+      const cleared = once(host, "player:action", (a) => a.type === "load" && a.media === null, 2000);
+      viewer.disconnect();
+      await Promise.all([sentOut, cleared]);
+      const room = srv.rt.rooms.get(code);
+      assert.ok(![...room.users.values()].some((u) => u.companion));
+    });
+
+    test("a person back within the grace period keeps their companion", async () => {
+      const { code } = await pair();
+      const page = await srv.connect();
+      await join(page, { code, name: "Phone", clientId: `p-${code}` });
+      const app = await srv.connect();
+      await join(app, { code, name: "Phone", clientId: `p-${code}`, companion: true });
+      page.disconnect();
+      const back = await srv.connect();
+      await join(back, { code, name: "Phone", clientId: `p-${code}` });
+      await none(app, "room:denied", () => true, 400);
+      assert.ok(srv.rt.rooms.get(code).users.has(app.id));
+    });
+
+    test("a reconnected companion replaces the stale one and its share", async () => {
+      const { code, host } = await pair();
+      const stale = await srv.connect();
+      await join(stale, { code, name: "Host", clientId: `h-${code}`, companion: true });
+      const first = await ack(stale, "stage:start", { source: "screen" });
+      assert.equal(first.ok, true);
+
+      const cleared = once(host, "player:action", (a) => a.type === "load" && a.media === null);
+      const fresh = await srv.connect();
+      const st = await join(fresh, { code, name: "Host", clientId: `h-${code}`, companion: true });
+      await cleared;
+      assert.equal(st.media, null);
+      const room = srv.rt.rooms.get(code);
+      assert.equal([...room.users.values()].filter((u) => u.companion).length, 1);
+      assert.equal((await ack(fresh, "stage:start", { source: "screen" })).ok, true);
     });
   });
 

@@ -20,7 +20,11 @@ let pending: Promise<RTCIceServer[]> | null = null;
 export function prefetchIce(): Promise<RTCIceServer[]> {
   if (Date.now() - fetchedAt < REFRESH) return Promise.resolve(servers);
   if (pending) return pending;
-  pending = fetch(`${REALTIME_URL}/api/ice`, { cache: "no-store" })
+  pending = fetch(`${REALTIME_URL}/api/ice`, {
+    cache: "no-store",
+    // A slow server must not hold up a call or share: STUN until it answers.
+    signal: AbortSignal.timeout(4000),
+  })
     .then((r) => (r.ok ? r.json() : null))
     .then((body) => {
       if (Array.isArray(body?.iceServers) && body.iceServers.length) {
