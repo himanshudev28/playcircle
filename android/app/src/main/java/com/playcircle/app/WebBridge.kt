@@ -29,6 +29,12 @@ class WebBridge(private val activity: MainActivity) {
         activity.runOnUiThread { activity.setShareVoice(on) }
     }
 
+    /** In a call: leaving the app drops it into picture-in-picture. */
+    @JavascriptInterface
+    fun setCallPip(on: Boolean) {
+        activity.runOnUiThread { activity.setCallPip(on) }
+    }
+
     @JavascriptInterface
     fun getShareState(): String = ShareState.toJson(ShareState.current)
 

@@ -75,6 +75,25 @@ silence.
 Netflix, banking apps and other protected apps show black and stay silent.
 That's Android's rule and can't be changed.
 
+## Calls in the app
+
+Calls are the website's, so they work the same on PC and phone. On top:
+
+- **Flip camera:** the ↻ button next to the camera switches front ↔ back
+  without dropping the call (shown when the phone has two cameras).
+- **Floating call:** the picture-in-picture button floats everyone's camera
+  over the room — drag it to any corner, shrink it to a pill, or bring it
+  back. In full screen the call floats on top of the video by itself.
+- **Pop-up (cameras only):** while you're in a call, leaving the app (home
+  button or gesture) shrinks PlayCircle into Android's picture-in-picture
+  window showing just the cameras. Tap it to come back. If it doesn't
+  appear: Settings → Apps → PlayCircle → Picture-in-picture → Allow.
+- **No echo:** while you're in a call, your voice goes out through the call
+  only — the screen share's **My voice** switch reads "via the call" and
+  stays off, so nobody hears you twice. The share's microphone runs Android's
+  echo canceller. On speaker the mic can still hear the phone's own sound;
+  headphones remove that completely.
+
 ## Build it yourself
 
 You need Android Studio (for the SDK and JDK 21).
