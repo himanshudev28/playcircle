@@ -22,6 +22,10 @@ users join the same rooms and see the same things.
      the web presenter in `components/room/useLiveStage.ts`.
 
   Viewers on PC or phone see an ordinary live share. Nothing changes for them.
+- **Sound** (`AppAudioCapture`) uses Android's playback capture on the same
+  screen-capture permission. It's fed into WebRTC through the audio record
+  hook in LiveKit's WebRTC build (`io.github.webrtc-sdk:android`), which
+  replaces the microphone buffer (or mixes into it) just before encoding.
 - **TURN relay.** The page passes the server's `/api/ice` list (STUN plus the
   ExpressTURN relay) to the app, so connections work across different
   networks and mobile data.
@@ -59,9 +63,16 @@ After installing:
 4. Stop from the room page, the notification, or Android's status-bar chip.
    Locking the phone also stops it on Android 15+.
 
-Netflix, banking apps and other protected apps show black. That's Android's
-rule and can't be changed. Sound isn't shared yet; use a call in the room to
-talk.
+**Sound:** other apps' sound (gallery videos, games, music) is shared too,
+on Android 10+, once you allow the microphone permission. Android files
+capturing other apps' audio under it, so the green mic dot shows while
+sharing. Only the app sound is sent. Turn on **My voice** on the room page
+to mix in your microphone. Calls and notification sounds are never captured.
+Sound plays through the phone's own speaker, so a muted phone sends
+silence.
+
+Netflix, banking apps and other protected apps show black and stay silent.
+That's Android's rule and can't be changed.
 
 ## Build it yourself
 
