@@ -7,8 +7,10 @@ import type { LiveStageApi, LiveStageStats } from "./useLiveStage";
 
 /* Fills the player box (the parent is `relative aspect-video`).
    - Viewer: the presenter's stream, with status overlays, quality and stats.
-   - Presenter: a muted preview of the capture (tab/screen) or the file's own
-     <video controls> — that element *is* the source everyone else sees. */
+   - Presenter: a muted preview of the capture (tab/screen/camera) or the
+     file's own <video controls> — that element *is* the source everyone else
+     sees. A front camera is mirrored here only, like a mirror; viewers get
+     the true picture. */
 
 const LEVELS: { value: StageQuality; label: string }[] = [
   { value: "auto", label: "Auto" },
@@ -21,6 +23,7 @@ const SOURCE_NOUN: Record<LiveMedia["source"], string> = {
   tab: "tab",
   screen: "screen",
   file: "video",
+  camera: "camera",
 };
 
 export function LiveStageView({
@@ -184,7 +187,10 @@ function PresenterView({ api, media }: { api: LiveStageApi; media: LiveMedia }) 
     cap,
     setCap,
     stopShare,
+    camera,
+    flipCamera,
   } = api;
+  const mirrored = camera?.facing === "user";
 
   useEffect(() => {
     const el = previewRef.current;
@@ -214,7 +220,9 @@ function PresenterView({ api, media }: { api: LiveStageApi; media: LiveMedia }) 
           autoPlay
           playsInline
           muted
-          className="absolute inset-0 h-full w-full bg-ink object-contain"
+          className={`absolute inset-0 h-full w-full bg-ink object-contain ${
+            mirrored ? "-scale-x-100" : ""
+          }`}
         />
       )}
 
@@ -227,7 +235,7 @@ function PresenterView({ api, media }: { api: LiveStageApi; media: LiveMedia }) 
 
       {/* Banner: what you're sharing, who's watching, and the controls. */}
       <div className="absolute inset-x-0 top-0 z-20 flex flex-wrap items-center gap-2 bg-gradient-to-b from-ink/90 via-ink/60 to-transparent p-3 pb-8">
-        <span className="flex min-w-0 flex-1 items-center gap-2 text-sm">
+        <span className="flex min-w-[11rem] flex-1 items-center gap-2 text-sm">
           <LiveDot />
           <span className="truncate">
             You&apos;re sharing <span className="font-semibold">{media.title}</span>
@@ -237,6 +245,16 @@ function PresenterView({ api, media }: { api: LiveStageApi; media: LiveMedia }) 
         <div className="flex shrink-0 items-center gap-1.5">
           <StatsChip stats={stats} />
           <QualityMenu label="Max quality" value={cap} onChange={setCap} />
+          {camera?.canFlip && (
+            <IconButton
+              label={
+                camera.facing === "user" ? "Switch to back camera" : "Switch to front camera"
+              }
+              onClick={flipCamera}
+            >
+              <Icon name="flip" size={15} />
+            </IconButton>
+          )}
           <FullscreenButton wrapRef={wrapRef} videoRef={previewRef} />
           <button
             onClick={stopShare}

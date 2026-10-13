@@ -8,6 +8,7 @@ import {
   SITE_TAGLINE,
   SITE_URL,
 } from "@/lib/site";
+import { PwaSetup } from "@/components/InstallButton";
 import "./globals.css";
 
 /* Three roles, three faces:
@@ -92,7 +93,10 @@ export default function RootLayout({
       lang="en"
       className={`${sora.variable} ${manrope.variable} ${azeret.variable} h-full`}
     >
-      <body className="grain min-h-full bg-ink text-bone">{children}</body>
+      <body className="grain min-h-full bg-ink text-bone">
+        {children}
+        <PwaSetup />
+      </body>
     </html>
   );
 }

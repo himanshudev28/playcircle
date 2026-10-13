@@ -175,6 +175,12 @@ export function RoomClient({ code }: { code: string }) {
   }, [media]);
 
   const stage = useLiveStage({ media, selfId, onToast: showToast });
+  // A camera share's mic would double your voice for anyone in the call.
+  const { setCameraMic } = stage;
+  const sharingCamera = !!stage.camera;
+  useEffect(() => {
+    if (sharingCamera) setCameraMic(!call.inCall);
+  }, [sharingCamera, call.inCall, setCameraMic]);
 
   // Join (or rejoin) the room, with the remembered password if there is one.
   const emitJoin = useCallback(() => {
@@ -571,7 +577,7 @@ export function RoomClient({ code }: { code: string }) {
                     Resync
                   </button>
                 )}
-                <ShareMenu api={stage} canShare={perms.video} />
+                <ShareMenu api={stage} canShare={perms.video} inCall={call.inCall} />
               </div>
             </div>
 

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Logo } from "@/components/Logo";
 import { Button } from "@/components/ui";
 import { Icon } from "@/components/Icon";
+import { InstallButton } from "@/components/InstallButton";
 
 const LINKS = [
   { label: "Features", href: "/#features" },
@@ -57,6 +58,7 @@ export function Nav() {
         </div>
 
         <div className="flex items-center gap-2">
+          <InstallButton />
           <Link
             href="/join"
             className="hidden rounded-lg px-3 py-2 text-sm text-smoke transition-colors hover:text-bone sm:block"

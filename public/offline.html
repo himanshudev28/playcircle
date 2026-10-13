@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#060505">
+<title>Offline · PlayCircle</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; place-items: center; padding: 24px; box-sizing: border-box;
+    background: #060505; color: #f5f1ea; text-align: center;
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .dot { width: 56px; height: 56px; margin: 0 auto 24px; border-radius: 50%;
+    border: 2px solid rgba(245,241,234,.28); display: grid; place-items: center; }
+  .dot::after { content: ""; width: 22px; height: 22px; border-radius: 50%; background: #f4433c; }
+  h1 { font-size: 22px; margin: 0 0 8px; }
+  p { margin: 0 0 24px; color: #a49b93; max-width: 32ch; }
+  button { font: inherit; font-weight: 600; color: #f5f1ea; background: #f4433c;
+    border: 0; border-radius: 999px; padding: 12px 22px; cursor: pointer; }
+</style>
+</head>
+<body>
+  <main>
+    <div class="dot" aria-hidden="true"></div>
+    <h1>You're offline</h1>
+    <p>Watch parties need a connection. Reconnect and try again.</p>
+    <button type="button" onclick="location.reload()">Try again</button>
+  </main>
+</body>
+</html>

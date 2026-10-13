@@ -18,8 +18,13 @@ import {
   type StageQuality,
 } from "@/lib/socket";
 
-/* Live stage: one presenter streams a browser tab, a screen or a local video
-   file to everyone else in the room over WebRTC.
+/* Live stage: one presenter streams a browser tab, a screen, a camera or a
+   local video file to everyone else in the room over WebRTC.
+
+   Phones: no mobile browser has getDisplayMedia, so tab/screen are desktop
+   only. Phones can share a camera (getUserMedia) or a video file — the file
+   is captured with captureStream() where it exists (Chrome, Firefox) and by
+   painting it onto a canvas plus Web Audio where it doesn't (Safari, iOS).
 
    Topology is a one-to-many mesh: the presenter holds one RTCPeerConnection
    per viewer and always makes the offer (sendonly); viewers only answer
@@ -94,8 +99,8 @@ export type LiveStageStats = {
 };
 
 export type LiveStageApi = {
-  /** Feature detection (getDisplayMedia, captureStream); false on phones. */
-  supported: { tab: boolean; screen: boolean; file: boolean };
+  /** Feature detection; tab/screen are false on phones. */
+  supported: { tab: boolean; screen: boolean; file: boolean; camera: boolean };
   isPresenter: boolean;
   status: "idle" | "starting" | "connecting" | "live" | "failed";
   /** Viewer: the presenter's stream. */
@@ -104,6 +109,15 @@ export type LiveStageApi = {
   localPreview: MediaStream | null;
   /** Presenter: local file object URL. */
   fileUrl: string | null;
+  /** Presenter, camera share: which way it faces and whether it can flip. */
+  camera: { facing: Facing; canFlip: boolean } | null;
+  /** Presenter, camera share: switch between front and back cameras. */
+  flipCamera: () => void;
+  /** Presenter, camera share: mute/unmute its mic (off while in a call). */
+  setCameraMic: (on: boolean) => void;
+  /** Call from the click that opens the file picker: Safari only lets an
+      AudioContext start inside a user gesture, and the file's sound needs one. */
+  primeFileShare: () => void;
   /** Presenter: ref callback for the file <video>. Stable identity. */
   bindFileVideo: (el: HTMLVideoElement | null) => void;
   /** Presenter: connected viewers. */
@@ -115,10 +129,17 @@ export type LiveStageApi = {
   /** Viewer: preference sent to the presenter (stage:quality). */
   quality: StageQuality;
   setQuality: (q: StageQuality) => void;
-  startShare: (source: ShareSource, file?: File) => Promise<void>;
+  startShare: (source: ShareSource, file?: File, opts?: ShareOpts) => Promise<void>;
   stopShare: () => void;
   /** Viewer: start over after "failed" (re-sends stage:want). */
   retry: () => void;
+};
+
+export type Facing = "user" | "environment";
+export type ShareOpts = {
+  /** camera: send the microphone too (off while in a call — it already
+      carries your voice). */
+  withAudio?: boolean;
 };
 
 type Signal = {
@@ -136,6 +157,8 @@ type PresState = {
   streamId: string | null;
   preview: MediaStream | null;
   fileUrl: string | null;
+  facing?: Facing;
+  canFlip?: boolean;
 };
 type ViewState = {
   streamId: string;
@@ -161,6 +184,9 @@ type Share = {
   /** Firefox's mozCaptureStream silences the element; this plays it back. */
   monitor: HTMLAudioElement | null;
   detach: (() => void) | null;
+  /** camera: which way the camera faces; set while a flip is in flight. */
+  facing: Facing;
+  flipping: boolean;
 };
 
 /** Presenter-side: one viewer's connection. */
@@ -209,7 +235,7 @@ type SendParams = RTCRtpSendParameters & {
 
 /* ------------------------------------------------------ Feature detection */
 
-const NOTHING = { tab: false, screen: false, file: false };
+const NOTHING = { tab: false, screen: false, file: false, camera: false };
 let detected: typeof NOTHING | null = null;
 
 /** Phones and tablets: no screen capture worth offering. */
@@ -231,14 +257,34 @@ function detectSupport(): typeof NOTHING {
   const mobile = isMobileDevice();
   const display =
     rtc && !mobile && typeof navigator.mediaDevices?.getDisplayMedia === "function";
-  const proto = HTMLMediaElement.prototype as unknown as Record<string, unknown>;
-  const file =
-    rtc &&
-    !mobile &&
-    (typeof proto.captureStream === "function" ||
-      typeof proto.mozCaptureStream === "function");
-  detected = { tab: display, screen: display, file };
+  const file = rtc && (hasNativeFileCapture() || canCanvasCapture());
+  const camera = rtc && typeof navigator.mediaDevices?.getUserMedia === "function";
+  detected = { tab: display, screen: display, file, camera };
   return detected;
+}
+
+function hasNativeFileCapture(): boolean {
+  const proto = HTMLMediaElement.prototype as unknown as Record<string, unknown>;
+  return (
+    typeof proto.captureStream === "function" ||
+    typeof proto.mozCaptureStream === "function"
+  );
+}
+
+function canCanvasCapture(): boolean {
+  return (
+    typeof HTMLCanvasElement.prototype.captureStream === "function" && !!audioCtor()
+  );
+}
+
+function audioCtor(): typeof AudioContext | null {
+  if (typeof window === "undefined") return null;
+  return (
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext ||
+    null
+  );
 }
 
 const noSubscribe = () => () => {};
@@ -284,6 +330,136 @@ async function getDisplay(source: "tab" | "screen"): Promise<MediaStream> {
     }
     throw e;
   }
+}
+
+function cameraVideo(facing: Facing): MediaTrackConstraints {
+  return {
+    facingMode: { ideal: facing },
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: { ideal: 30 },
+  };
+}
+
+async function getCamera(facing: Facing, withAudio: boolean): Promise<MediaStream> {
+  const md = navigator.mediaDevices;
+  const audio = withAudio ? { echoCancellation: true, noiseSuppression: true } : false;
+  try {
+    return await md.getUserMedia({ video: cameraVideo(facing), audio });
+  } catch (e) {
+    // A missing or busy mic shouldn't cost the picture.
+    const name = errName(e);
+    if (withAudio && (name === "NotFoundError" || name === "NotReadableError")) {
+      return md.getUserMedia({ video: cameraVideo(facing), audio: false });
+    }
+    throw e;
+  }
+}
+
+async function cameraCount(): Promise<number> {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter((d) => d.kind === "videoinput").length;
+  } catch {
+    return 0;
+  }
+}
+
+type FrameVideo = HTMLVideoElement & {
+  requestVideoFrameCallback?: (cb: () => void) => number;
+  cancelVideoFrameCallback?: (handle: number) => void;
+};
+
+/** Canvas captures also hold a paint loop and an audio graph. */
+const captureStops = new WeakMap<MediaStream, () => void>();
+
+function stopCapture(stream: MediaStream) {
+  captureStops.get(stream)?.();
+  captureStops.delete(stream);
+  stopAll(stream);
+}
+
+/* Safari (and so every iPhone browser) can't captureStream() a <video>:
+   paint the element onto a canvas and capture that, and route its sound
+   through Web Audio. A <video> can only ever have one MediaElementSource,
+   so this runs at most once per element (the captures map sees to that). */
+function canvasCapture(el: HTMLVideoElement, ctx: AudioContext | null): MediaStream {
+  const canvas = document.createElement("canvas");
+  const g = canvas.getContext("2d");
+  // Phones pay for every pixel twice (paint + encode).
+  const maxHeight = isMobileDevice() ? 720 : 1080;
+  const draw = () => {
+    const vw = el.videoWidth;
+    const vh = el.videoHeight;
+    if (!g || !vw || !vh) return;
+    const scale = Math.min(1, maxHeight / vh);
+    const w = Math.round((vw * scale) / 2) * 2;
+    const h = Math.round((vh * scale) / 2) * 2;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    g.drawImage(el, 0, 0, w, h);
+  };
+
+  const fv = el as FrameVideo;
+  let stopped = false;
+  let handle = 0;
+  const viaFrames = typeof fv.requestVideoFrameCallback === "function";
+  const loop = () => {
+    if (stopped) return;
+    draw();
+    handle = viaFrames ? fv.requestVideoFrameCallback!(loop) : requestAnimationFrame(loop);
+  };
+  loop();
+  // Paused or seeked: no new frames, but a viewer joining now still needs a
+  // picture, so repaint now and then.
+  const idle = setInterval(() => {
+    if (el.paused) draw();
+  }, 1000);
+  el.addEventListener("seeked", draw);
+  el.addEventListener("loadeddata", draw);
+
+  const tracks: MediaStreamTrack[] = [...canvas.captureStream(30).getVideoTracks()];
+  let source: MediaElementAudioSourceNode | null = null;
+  let dest: MediaStreamAudioDestinationNode | null = null;
+  if (ctx) {
+    try {
+      source = ctx.createMediaElementSource(el);
+      dest = ctx.createMediaStreamDestination();
+      source.connect(dest);
+      // The element's sound now only reaches the speakers through the graph.
+      source.connect(ctx.destination);
+      tracks.push(...dest.stream.getAudioTracks());
+    } catch {
+      source = null; // picture only
+    }
+  }
+  const resume = () => {
+    if (ctx && ctx.state !== "running") ctx.resume().catch(() => {});
+  };
+  resume();
+  el.addEventListener("play", resume);
+
+  const stream = new MediaStream(tracks);
+  captureStops.set(stream, () => {
+    stopped = true;
+    if (viaFrames) fv.cancelVideoFrameCallback?.(handle);
+    else cancelAnimationFrame(handle);
+    clearInterval(idle);
+    el.removeEventListener("seeked", draw);
+    el.removeEventListener("loadeddata", draw);
+    el.removeEventListener("play", resume);
+    // Keep source → speakers: the element may still be on screen.
+    if (source && dest) {
+      try {
+        source.disconnect(dest);
+      } catch {
+        /* already gone */
+      }
+    }
+  });
+  return stream;
 }
 
 /** A readable name for what was picked. Chrome labels tabs with internal ids. */
@@ -348,6 +524,8 @@ class StageEngine {
   private negotiation = 0;
   private cap: StageQuality = "auto";
   private warnedFull = false;
+  /** Canvas file captures route sound through this; made in a gesture. */
+  private audioCtx: AudioContext | null = null;
 
   // viewer
   private viewer: ViewerCtl | null = null;
@@ -508,7 +686,23 @@ class StageEngine {
     this.stopShare();
     const v = this.viewer;
     if (v) this.unwatch(v);
+    this.audioCtx?.close().catch(() => {});
+    this.audioCtx = null;
   }
+
+  primeFileShare = () => {
+    if (hasNativeFileCapture()) return;
+    const Ctx = audioCtor();
+    if (!Ctx) return;
+    if (!this.audioCtx || this.audioCtx.state === "closed") {
+      try {
+        this.audioCtx = new Ctx();
+      } catch {
+        return;
+      }
+    }
+    this.audioCtx.resume().catch(() => {});
+  };
 
   private async onSignal({ from, streamId, data }: SignalMsg) {
     if (!data || typeof data !== "object") return;
@@ -525,7 +719,11 @@ class StageEngine {
 
   /* ------------------------------------------------------- presenter */
 
-  startShare = async (source: ShareSource, file?: File): Promise<void> => {
+  startShare = async (
+    source: ShareSource,
+    file?: File,
+    opts: ShareOpts = {}
+  ): Promise<void> => {
     if (this.share) {
       this.toast("You're already sharing — stop that first");
       return;
@@ -533,11 +731,13 @@ class StageEngine {
     const support = detectSupport();
     if (!support[source]) {
       this.toast(
-        isMobileDevice()
-          ? "Sharing isn't available on phones"
+        source === "camera"
+          ? "This browser can't use the camera"
           : source === "file"
             ? "Your browser can't stream local files — try Chrome or Edge"
-            : "Your browser can't share screens"
+            : isMobileDevice()
+              ? "Phones can't share their screen from a browser — share your camera or a video file"
+              : "Your browser can't share screens"
       );
       return;
     }
@@ -557,6 +757,8 @@ class StageEngine {
       captures: new Map(),
       monitor: null,
       detach: null,
+      facing: "user",
+      flipping: false,
     };
 
     let title: string;
@@ -595,11 +797,22 @@ class StageEngine {
       });
       let stream: MediaStream;
       try {
-        stream = await getDisplay(source);
+        stream =
+          source === "camera"
+            ? await getCamera(share.facing, opts.withAudio ?? true)
+            : await getDisplay(source);
       } catch (e) {
         if (this.share === share) this.endLocal(share);
         const name = errName(e);
-        if (name === "NotAllowedError" && /system/i.test(errMessage(e))) {
+        if (source === "camera") {
+          this.toast(
+            name === "NotAllowedError"
+              ? "Camera blocked — allow it in your browser's site settings"
+              : name === "NotReadableError"
+                ? "Your camera is busy in another app"
+                : "Couldn't start the camera"
+          );
+        } else if (name === "NotAllowedError" && /system/i.test(errMessage(e))) {
           this.toast(
             "Your system blocked screen capture — allow it for this browser in system settings"
           );
@@ -621,22 +834,14 @@ class StageEngine {
         return;
       }
       video.contentHint = source === "screen" ? "detail" : "motion";
-      // The browser's own "Stop sharing" bar.
-      video.addEventListener("ended", () => {
-        if (this.share === share) this.stopShare();
-      });
+      this.watchEnded(share, video);
       share.stream = stream;
       share.video = video;
       share.audio = stream.getAudioTracks()[0] ?? null;
-      title = shareTitle(source, video);
+      title = source === "camera" ? "Live camera" : shareTitle(source, video);
       this.applyCapToSource(share);
-      this.set.setPres({
-        phase: "starting",
-        source,
-        streamId: null,
-        preview: stream,
-        fileUrl: null,
-      });
+      this.set.setPres(this.presFor(share, "starting", null, stream));
+      if (source === "camera") this.checkFlip(share);
     }
 
     const res = await new Promise<StartReply | null>((resolve) => {
@@ -668,14 +873,131 @@ class StageEngine {
     }
     share.streamId = res.streamId;
     this.warnedFull = false;
-    this.set.setPres({
-      phase: "live",
-      source,
-      streamId: res.streamId,
-      preview: source === "file" ? null : share.stream,
-      fileUrl: share.fileUrl,
-    });
+    const live = this.presFor(
+      share,
+      "live",
+      res.streamId,
+      source === "file" ? null : share.stream
+    );
+    // checkFlip may already have answered.
+    this.set.setPres((p) => ({ ...live, canFlip: p?.canFlip }));
   };
+
+  private presFor(
+    share: Share,
+    phase: PresState["phase"],
+    streamId: string | null,
+    preview: MediaStream | null
+  ): PresState {
+    return {
+      phase,
+      source: share.source,
+      streamId,
+      preview,
+      fileUrl: share.source === "file" && phase === "live" ? share.fileUrl : null,
+      facing: share.facing,
+    };
+  }
+
+  /** The browser's own "Stop sharing" bar, or the camera being taken away. */
+  private watchEnded(share: Share, video: MediaStreamTrack) {
+    video.addEventListener("ended", () => {
+      if (this.share === share && share.video === video && !share.flipping) {
+        this.stopShare();
+      }
+    });
+  }
+
+  /** Only offer a flip when there's a second camera to flip to. */
+  private checkFlip(share: Share) {
+    cameraCount().then((count) => {
+      if (this.share !== share || count < 2) return;
+      this.set.setPres((p) => (p ? { ...p, canFlip: true } : p));
+    });
+  }
+
+  /** Camera share: silence its mic while in a call (the call carries your
+      voice) and bring it back after. */
+  setCameraMic = (on: boolean) => {
+    const share = this.share;
+    if (share?.source === "camera" && share.audio) share.audio.enabled = on;
+  };
+
+  flipCamera = () => {
+    this.flipCameraAsync().catch(() => {});
+  };
+
+  private async flipCameraAsync() {
+    const share = this.share;
+    if (!share || share.source !== "camera" || share.flipping) return;
+    share.flipping = true;
+    const next: Facing = share.facing === "user" ? "environment" : "user";
+    const old = share.video;
+    const oldId = old?.getSettings().deviceId;
+    // Phones generally can't hold two cameras open: let go of this one first.
+    old?.stop();
+    const open = async (video: MediaTrackConstraints) => {
+      try {
+        const got = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+        return got.getVideoTracks()[0] ?? null;
+      } catch {
+        return null;
+      }
+    };
+    // facingMode is only a hint: cameras that don't report one (USB webcams,
+    // some multi-lens phones) hand back the same device. Then step to
+    // another camera by id instead.
+    let video = await open(cameraVideo(next));
+    if (video && oldId && video.getSettings().deviceId === oldId) {
+      video.stop();
+      video = null;
+      const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+      const other = devices.find((d) => d.kind === "videoinput" && d.deviceId !== oldId);
+      if (other?.deviceId) {
+        video = await open({
+          ...cameraVideo(next),
+          facingMode: undefined,
+          deviceId: { exact: other.deviceId },
+        });
+      }
+    }
+    const flipped = !!video;
+    if (!video) {
+      // Couldn't switch: get the camera we had back.
+      video = await open(
+        oldId
+          ? { ...cameraVideo(share.facing), deviceId: { exact: oldId } }
+          : cameraVideo(share.facing)
+      );
+    }
+    const reported = video?.getSettings().facingMode;
+    const facing: Facing =
+      reported === "user" || reported === "environment"
+        ? reported
+        : flipped
+          ? next
+          : share.facing;
+    share.flipping = false;
+    if (this.share !== share) {
+      video?.stop();
+      return;
+    }
+    if (!video) {
+      this.toast("Lost the camera — sharing stopped");
+      this.stopShare();
+      return;
+    }
+    if (!flipped) this.toast("Couldn't switch cameras");
+    video.contentHint = "motion";
+    this.watchEnded(share, video);
+    share.facing = facing;
+    share.stream = new MediaStream(share.audio ? [video, share.audio] : [video]);
+    this.setTracks(share, video, share.audio);
+    this.applyCapToSource(share);
+    this.set.setPres((p) =>
+      p ? { ...p, preview: share.stream, facing: share.facing } : p
+    );
+  }
 
   stopShare = () => {
     const share = this.share;
@@ -693,7 +1015,10 @@ class StageEngine {
     share.detach?.();
     share.detach = null;
     stopAll(share.stream);
-    for (const captured of share.captures.values()) stopAll(captured);
+    for (const captured of share.captures.values()) stopCapture(captured);
+    // Idle until the next file share (primeFileShare resumes it); a running
+    // context keeps the phone's audio session awake.
+    if (this.audioCtx?.state === "running") this.audioCtx.suspend().catch(() => {});
     share.captures.clear();
     share.video?.stop();
     share.audio?.stop();
@@ -720,7 +1045,7 @@ class StageEngine {
     // A different element took over: the old one's capture has no use.
     for (const [old, captured] of share.captures) {
       if (old === el) continue;
-      stopAll(captured);
+      stopCapture(captured);
       share.captures.delete(old);
     }
   };
@@ -728,13 +1053,24 @@ class StageEngine {
   private captureFile(share: Share, el: CapturableVideo) {
     // Re-bound (StrictMode, a remount of the same element): reuse.
     let captured: MediaStream | null = share.captures.get(el) ?? null;
-    const viaMoz = typeof el.captureStream !== "function";
+    const mode =
+      typeof el.captureStream === "function"
+        ? "native"
+        : typeof el.mozCaptureStream === "function"
+          ? "moz"
+          : "canvas";
+    const viaMoz = mode === "moz";
 
     const refresh = () => {
       if (this.share !== share || share.fileEl !== el) return;
       if (!captured) {
         try {
-          captured = viaMoz ? el.mozCaptureStream!() : el.captureStream!();
+          captured =
+            mode === "canvas"
+              ? canvasCapture(el, this.audioCtx)
+              : viaMoz
+                ? el.mozCaptureStream!()
+                : el.captureStream!();
         } catch {
           return; // not ready yet; loadedmetadata/playing will try again
         }
@@ -903,10 +1239,12 @@ class StageEngine {
     return share.video?.getSettings().height || share.fileEl?.videoHeight || 0;
   }
 
-  /** tab/screen: ask the capture itself for the cap's resolution. */
+  /** tab/screen/camera: ask the capture itself for the cap's resolution. */
   private applyCapToSource(share: Share) {
     if (share.source === "file" || !share.video) return;
-    const height = this.cap === "auto" ? 1080 : TARGET_HEIGHT[this.cap];
+    // A camera at "auto" stays at 720p: phones upload once per viewer.
+    const auto = share.source === "camera" ? 720 : 1080;
+    const height = this.cap === "auto" ? auto : TARGET_HEIGHT[this.cap];
     share.video
       .applyConstraints({ frameRate: { ideal: 30 }, height: { ideal: height } })
       .catch(() => {})
@@ -1325,6 +1663,13 @@ export function useLiveStage({
       remoteStream,
       localPreview: pres?.preview ?? null,
       fileUrl: pres?.fileUrl ?? null,
+      camera:
+        pres?.source === "camera"
+          ? { facing: pres.facing ?? "user", canFlip: !!pres.canFlip }
+          : null,
+      flipCamera: engine.flipCamera,
+      setCameraMic: engine.setCameraMic,
+      primeFileShare: engine.primeFileShare,
       bindFileVideo: engine.bindFileVideo,
       viewerCount: pres ? viewerCount : 0,
       stats: shownStats,

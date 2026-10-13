@@ -87,9 +87,24 @@ Decisions made while building:
   gets around them; reports go to the room's host only.
 
 Limits that still apply: copy-protected sites (Netflix, Prime, Disney+,
-Hotstar…) show black; tab audio only in desktop Chrome/Edge; phones can't
-share; local-file streaming is re-encoded (not original quality) and doesn't
-work in Safari; strict networks need a TURN server (`NEXT_PUBLIC_ICE_SERVERS`).
+Hotstar…) show black; tab audio only in desktop Chrome/Edge; phone browsers
+can't share their screen (no `getDisplayMedia` on any mobile browser, PWA or
+not); local-file streaming is re-encoded (not original quality); strict
+networks need a TURN server (`NEXT_PUBLIC_ICE_SERVERS`).
+
+### Mobile sharing + installable app (2026-10-13)
+
+- [x] Camera on the stage (front/back, live flip; mic left out while in a call)
+- [x] Video file from a phone (Android: native capture; Safari/iOS: canvas +
+      Web Audio fallback, which also fixes desktop Safari)
+- [x] Share menu becomes a bottom sheet on phones
+- [x] PWA: manifest, icons, offline page, service worker (production only),
+      "Install app" button where Chrome offers it
+- [ ] Whole-screen share from an Android phone — needs a native companion
+      app; plan in `NATIVE_SCREENSHARE.md` (or scrcpy, no code)
+
+Camera and the install prompt need a secure origin: on a phone use the
+HTTPS deploy (or a tunnel); a plain `http://<LAN-IP>:3000` disables them.
 
 Verified 2026-10-13: server test suite (`npm test`) plus a two-browser run —
 tab share start/view/stop, floating reactions + moments, clickable chat

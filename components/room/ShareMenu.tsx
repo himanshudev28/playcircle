@@ -5,15 +5,20 @@ import { Icon } from "@/components/Icon";
 import type { ShareSource } from "@/lib/socket";
 import { isMobileDevice, type LiveStageApi } from "./useLiveStage";
 
-/* "Share" button + menu: a browser tab, the whole screen, or a video file
-   from this device. While you're presenting it becomes "Stop sharing". */
+/* "Share" button + menu: a browser tab, the whole screen, a camera, or a
+   video file from this device. While you're presenting it becomes "Stop
+   sharing". Phones can't capture their screen from a browser at all, so
+   there the camera and file come first. */
 
 export function ShareMenu({
   api,
   canShare,
+  inCall,
 }: {
   api: LiveStageApi;
   canShare: boolean;
+  /** In a call your voice already reaches everyone: the camera goes silent. */
+  inCall: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -55,18 +60,20 @@ export function ShareMenu({
 
   // Only rendered after a click, so reading navigator here can't cause a
   // hydration mismatch.
+  const mobile = isMobileDevice();
   const reason = (source: ShareSource): string | null => {
     if (api.supported[source]) return null;
-    if (isMobileDevice()) return "Not available on phones";
-    return source === "file"
-      ? "Needs Chrome, Edge or Firefox"
+    if (source === "camera") return "This browser can't use a camera";
+    if (source === "file") return "This browser can't stream files";
+    return mobile
+      ? "Phone browsers can't share the screen"
       : "Your browser can't share screens";
   };
 
   // Called straight from the click: getDisplayMedia needs that gesture.
-  function pick(source: "tab" | "screen") {
+  function pick(source: "tab" | "screen" | "camera") {
     setOpen(false);
-    api.startShare(source).catch(() => {});
+    api.startShare(source, undefined, { withAudio: !inCall }).catch(() => {});
   }
 
   function onFile(e: ChangeEvent<HTMLInputElement>) {
@@ -74,6 +81,54 @@ export function ShareMenu({
     e.target.value = ""; // picking the same file again still fires change
     if (file) api.startShare("file", file).catch(() => {});
   }
+
+  const screenItems = (
+    <>
+      <Item
+        icon={<Icon name="globe" size={17} />}
+        title="Browser tab (with audio)"
+        hint="Best for video sites — sound included"
+        disabledReason={reason("tab")}
+        onClick={() => pick("tab")}
+      />
+      <Item
+        icon={<Icon name="monitor" size={17} />}
+        title="Entire screen"
+        hint="Everything on one display"
+        disabledReason={reason("screen")}
+        onClick={() => pick("screen")}
+      />
+    </>
+  );
+  const fileItem = (
+    <Item
+      icon={<Icon name="film" size={17} />}
+      title="Video file from this device"
+      hint={mobile ? "From your gallery — streams to everyone" : "Plays here, streams to everyone"}
+      disabledReason={reason("file")}
+      onClick={() => {
+        setOpen(false);
+        // Inside the tap: Safari only starts audio from a gesture.
+        api.primeFileShare();
+        fileRef.current?.click();
+      }}
+    />
+  );
+  const cameraItem = (
+    <Item
+      icon={<Icon name="video" size={17} />}
+      title="Camera"
+      hint={
+        inCall
+          ? "Live on the stage — your call carries the sound"
+          : mobile
+            ? "Front or back camera, live on the stage"
+            : "Your webcam, live on the stage"
+      }
+      disabledReason={reason("camera")}
+      onClick={() => pick("camera")}
+    />
+  );
 
   return (
     <div ref={boxRef} className="relative">
@@ -102,34 +157,27 @@ export function ShareMenu({
         <div
           role="menu"
           aria-label="Share to the room"
-          className="absolute right-0 top-full z-40 mt-2 w-72 overflow-hidden rounded-card border border-edge bg-film-2 p-1.5 shadow-2xl"
+          // Phones: a bottom sheet — the button can sit anywhere in the
+          // wrapped toolbar, so an anchored popover would run off-screen.
+          className="fixed inset-x-3 bottom-3 z-50 overflow-hidden rounded-card border border-edge bg-film-2 p-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))] shadow-2xl sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-full sm:z-40 sm:mt-2 sm:w-72 sm:pb-1.5"
         >
-          <Item
-            icon={<Icon name="globe" size={17} />}
-            title="Browser tab (with audio)"
-            hint="Best for video sites — sound included"
-            disabledReason={reason("tab")}
-            onClick={() => pick("tab")}
-          />
-          <Item
-            icon={<Icon name="monitor" size={17} />}
-            title="Entire screen"
-            hint="Everything on one display"
-            disabledReason={reason("screen")}
-            onClick={() => pick("screen")}
-          />
-          <Item
-            icon={<Icon name="film" size={17} />}
-            title="Video file from this device"
-            hint="Plays here, streams to everyone"
-            disabledReason={reason("file")}
-            onClick={() => {
-              setOpen(false);
-              fileRef.current?.click();
-            }}
-          />
+          {mobile ? (
+            <>
+              {fileItem}
+              {cameraItem}
+              {screenItems}
+            </>
+          ) : (
+            <>
+              {screenItems}
+              {fileItem}
+              {cameraItem}
+            </>
+          )}
           <p className="mt-1 border-t border-edge px-3 pb-1.5 pt-2.5 text-[11px] leading-snug text-dim">
-            Copy-protected sites (Netflix etc.) show black.
+            {mobile
+              ? "Keep this tab open while you share — switching apps pauses it."
+              : "Copy-protected sites (Netflix etc.) show black."}
           </p>
         </div>
       )}

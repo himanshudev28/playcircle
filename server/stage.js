@@ -1,5 +1,5 @@
-// Live sharing: one presenter streams a browser tab, their screen, or a
-// local video file to everyone else over WebRTC. The server only decides
+// Live sharing: one presenter streams a browser tab, their screen, a
+// camera, or a local video file to everyone else over WebRTC. The server only decides
 // who may present and relays signaling between the presenter and each
 // viewer; media never touches it.
 //
@@ -14,6 +14,7 @@ const SOURCE_TITLES = {
   tab: "Shared tab",
   screen: "Shared screen",
   file: "Shared video file",
+  camera: "Live camera",
 };
 const QUALITIES = ["auto", "1080", "720", "480"];
 
@@ -79,8 +80,8 @@ module.exports = function registerStage(ctx) {
         if (!ctx.effectivePerms(room, socket.id).video) {
           return reply({ ok: false, error: "Only people with video control can share" });
         }
-        const source = oneOf(p.source, ["tab", "screen", "file"]);
-        if (!source) return reply({ ok: false, error: "Pick a tab, screen or file" });
+        const source = oneOf(p.source, ["tab", "screen", "file", "camera"]);
+        if (!source) return reply({ ok: false, error: "Pick a tab, screen, camera or file" });
         if (!allow("stage:start", 4, 20_000)) {
           return reply({ ok: false, error: "Slow down a little" });
         }

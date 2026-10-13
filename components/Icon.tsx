@@ -167,6 +167,13 @@ const PATHS = {
     </>
   ),
   power: <path d="M12 3v8.4M7 6.2a7.8 7.8 0 1 0 10 0" />,
+  flip: (
+    <>
+      <path d="M4.6 10.2a7.6 7.6 0 0 1 13.4-3.4l1.6 1.8M19.4 13.8A7.6 7.6 0 0 1 6 17.2l-1.6-1.8" />
+      <path d="M19.8 4.4v4.4h-4.4M4.2 19.6v-4.4h4.4" />
+    </>
+  ),
+  download: <path d="M12 3.6v11.6m-4.8-4.8L12 15.2l4.8-4.8M4.4 20.4h15.2" />,
 } as const;
 
 export type IconName = keyof typeof PATHS;

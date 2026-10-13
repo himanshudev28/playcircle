@@ -1452,6 +1452,17 @@ describe("realtime", () => {
       assert.ok(room.history.every((h) => h.media.kind === "youtube"));
     });
 
+    test("camera is a share source; unknown sources are refused", async () => {
+      const { code, host } = await pair();
+      const bad = await ack(host, "stage:start", { source: "webcam" });
+      assert.equal(bad.ok, false);
+      const res = await ack(host, "stage:start", { source: "camera" });
+      assert.equal(res.ok, true);
+      const media = srv.rt.rooms.get(code).media;
+      assert.equal(media.source, "camera");
+      assert.equal(media.title, "Live camera");
+    });
+
     test("stage:stop: presenter or admin only", async () => {
       const { code, host, viewer } = await pair();
       const { streamId } = await ack(host, "stage:start", { source: "tab" });

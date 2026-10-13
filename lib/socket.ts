@@ -44,7 +44,7 @@ export type YoutubeMedia = {
   thumb?: string;
 };
 
-export type ShareSource = "tab" | "screen" | "file";
+export type ShareSource = "tab" | "screen" | "file" | "camera";
 
 /** Someone's tab, screen or local file, streamed live over WebRTC. */
 export type LiveMedia = {

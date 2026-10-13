@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { Logo } from "@/components/Logo";
 import { Button } from "@/components/ui";
+import { InstallButton } from "@/components/InstallButton";
 
 const TABS = [
   { key: "lobby", label: "Lobby", href: "/lobby" },
@@ -30,9 +31,12 @@ export function AppHeader({ active }: { active?: "lobby" | "vent" }) {
             ))}
           </nav>
         </div>
-        <Button href="/join" size="md">
-          Create room
-        </Button>
+        <div className="flex items-center gap-1">
+          <InstallButton />
+          <Button href="/join" size="md">
+            Create room
+          </Button>
+        </div>
       </div>
     </header>
   );
