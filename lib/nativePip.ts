@@ -62,6 +62,54 @@ export function useAndroidPipClosed(fn: () => void) {
   }, [fn]);
 }
 
+/* "Pop-up when I leave the app": the person's own switch, remembered on
+   this phone. On unless they've turned it off. */
+const PREF_KEY = "pc:callPip";
+let prefOn = true;
+let prefLoaded = false;
+const prefListeners = new Set<() => void>();
+
+function readPref(): boolean {
+  if (!prefLoaded) {
+    prefLoaded = true;
+    try {
+      prefOn = localStorage.getItem(PREF_KEY) !== "off";
+    } catch {
+      /* private mode: default on */
+    }
+  }
+  return prefOn;
+}
+
+export function setPipPreference(on: boolean) {
+  prefOn = on;
+  prefLoaded = true;
+  try {
+    localStorage.setItem(PREF_KEY, on ? "on" : "off");
+  } catch {
+    /* just don't remember */
+  }
+  prefListeners.forEach((l) => l());
+}
+
+export function usePipPreference(): boolean {
+  return useSyncExternalStore(
+    (l) => {
+      prefListeners.add(l);
+      return () => {
+        prefListeners.delete(l);
+      };
+    },
+    readPref,
+    () => true
+  );
+}
+
+/** True inside the Android app (which has the pop-up at all). */
+export function isAndroidApp(): boolean {
+  return !!bridge()?.setCallPip;
+}
+
 /** Lets the Android app pop into picture-in-picture while `on` (in a call). */
 export function useCallPip(on: boolean) {
   useEffect(() => {

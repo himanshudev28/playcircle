@@ -3,7 +3,14 @@
 import { useState } from "react";
 import { Icon, type IconName } from "@/components/Icon";
 import type { RoomUser } from "@/lib/socket";
-import { useAndroidPip, useAndroidPipClosed, useCallPip } from "@/lib/nativePip";
+import {
+  isAndroidApp,
+  setPipPreference,
+  useAndroidPip,
+  useAndroidPipClosed,
+  useCallPip,
+  usePipPreference,
+} from "@/lib/nativePip";
 import { CallFloat, CallPip, useFullscreenHost, useSystemPip } from "./CallFloat";
 import { Avatar, CallAudio, Tile } from "./CallTile";
 import type { CallApi } from "./useCall";
@@ -32,7 +39,8 @@ export function CallPanel({
   const [popped, setPopped] = useState(false);
   const host = useFullscreenHost();
   const androidPip = useAndroidPip();
-  useCallPip(call.inCall);
+  const pipPref = usePipPreference();
+  useCallPip(call.inCall && pipPref);
   useAndroidPipClosed(call.leave);
   // Lives here, not in the floating window: the pop-out must outlast it
   // (leaving full screen — which switching tabs does — unmounts the window).
@@ -152,11 +160,35 @@ export function CallPanel({
       )}
 
       <div className="mt-3 flex items-center justify-between gap-2">
-        <p className="px-1 text-xs text-smoke">
-          {others.length === 0
-            ? "You're the only one here — others can join from their call bar."
-            : `${callers.length} in the call`}
-        </p>
+        <div className="min-w-0 px-1">
+          <p className="text-xs text-smoke">
+            {others.length === 0
+              ? "You're the only one here — others can join from their call bar."
+              : `${callers.length} in the call`}
+          </p>
+          {isAndroidApp() && (
+            <button
+              type="button"
+              role="switch"
+              aria-checked={pipPref}
+              onClick={() => setPipPreference(!pipPref)}
+              className="mt-1.5 flex items-center gap-2 text-xs text-smoke transition hover:text-bone"
+            >
+              <span
+                className={`relative h-4 w-7 shrink-0 rounded-full transition-colors ${
+                  pipPref ? "bg-signal" : "bg-bone/20"
+                }`}
+              >
+                <span
+                  className={`absolute top-0.5 h-3 w-3 rounded-full bg-bone transition-[left] ${
+                    pipPref ? "left-[0.875rem]" : "left-0.5"
+                  }`}
+                />
+              </span>
+              Pop-up when I leave the app
+            </button>
+          )}
+        </div>
         <div className="flex gap-2">
           <ControlButton
             onClick={call.toggleMic}
