@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Icon } from "@/components/Icon";
 import type { RoomUser } from "@/lib/socket";
 import { useSpeaking } from "./useCall";
@@ -9,6 +9,28 @@ import { useSpeaking } from "./useCall";
    call window (CallFloat). Tiles are picture only: everyone's sound plays
    through CallAudio, once, so moving the tiles between the panel, the
    floating window and picture-in-picture never doubles or drops a voice. */
+
+/* What a tile's <video> plays: the picture only. Sound is CallAudio's job,
+   and a stream that still carries your microphone gets its <video> paused
+   by Android Chrome while the phone app shares its screen — your own camera
+   froze in the pop-up even though everyone else saw it live. */
+export function usePictureOnly(stream: MediaStream | null): MediaStream | null {
+  const video = stream?.getVideoTracks()[0] ?? null;
+  return useMemo(() => (video ? new MediaStream([video]) : null), [video]);
+}
+
+/** Keeps a camera <video> playing: anything that pauses it gets undone. */
+export function useKeepPlaying(ref: React.RefObject<HTMLVideoElement | null>, on: boolean) {
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !on) return;
+    const resume = () => {
+      if (el.srcObject) el.play().catch(() => {});
+    };
+    el.addEventListener("pause", resume);
+    return () => el.removeEventListener("pause", resume);
+  }, [ref, on]);
+}
 
 export function Tile({
   user,
@@ -31,15 +53,17 @@ export function Tile({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const speaking = useSpeaking(stream, mic);
-  const showVideo = cam && !!stream?.getVideoTracks().length;
+  const picture = usePictureOnly(stream);
+  const showVideo = cam && !!picture;
+  useKeepPlaying(videoRef, showVideo);
 
   useEffect(() => {
     const el = videoRef.current;
     if (!el) return;
-    el.srcObject = showVideo ? stream : null;
+    el.srcObject = showVideo ? picture : null;
     // A tile that remounts (panel ↔ floating) must start playing again.
     if (showVideo) el.play().catch(() => {});
-  }, [stream, showVideo]);
+  }, [picture, showVideo]);
 
   return (
     <div

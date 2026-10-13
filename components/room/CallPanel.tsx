@@ -121,7 +121,10 @@ export function CallPanel({
         )
       )}
 
-      {floating ? (
+      {/* In the Android pop-up the tiles step aside: Android Chrome freezes
+          one of two <video>s showing the same local camera, and the pop-up
+          already shows yours. */}
+      {androidPip ? null : floating ? (
         <button
           type="button"
           onClick={() => setPopped(false)}

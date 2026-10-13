@@ -12,7 +12,7 @@ import {
 import { createPortal } from "react-dom";
 import { Icon, type IconName } from "@/components/Icon";
 import type { RoomUser } from "@/lib/socket";
-import { Avatar, Tile } from "./CallTile";
+import { Avatar, Tile, useKeepPlaying, usePictureOnly } from "./CallTile";
 import type { CallApi } from "./useCall";
 
 /* The call, floating over whatever you're watching: a small window of
@@ -341,13 +341,15 @@ export function CallPip({
 
 function PipFace({ entry, mirror }: { entry: Entry; mirror: boolean }) {
   const ref = useRef<HTMLVideoElement>(null);
-  const showVideo = entry.cam && !!entry.stream?.getVideoTracks().length;
+  const picture = usePictureOnly(entry.stream);
+  const showVideo = entry.cam && !!picture;
+  useKeepPlaying(ref, showVideo);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    el.srcObject = showVideo ? entry.stream : null;
+    el.srcObject = showVideo ? picture : null;
     if (showVideo) el.play().catch(() => {});
-  }, [entry.stream, showVideo]);
+  }, [picture, showVideo]);
   return (
     <div className="relative h-full min-h-0 w-full overflow-hidden bg-ink">
       {showVideo ? (
