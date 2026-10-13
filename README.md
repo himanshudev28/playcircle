@@ -292,7 +292,7 @@ Every handler runs through `safe()` in [`server/limits.js`](server/limits.js): p
 
 PlayCircle is a long-running Node process (Next.js and Socket.IO in one server), so it needs a host that keeps it running: **Render, Railway, Fly.io, or a VPS**. Vercel can't run the realtime server; it can still serve the pages if `NEXT_PUBLIC_SOCKET_URL` points at a server running elsewhere.
 
-The repo includes a Render Blueprint ([`render.yaml`](render.yaml)) for one free web service. It's live at **https://playcircle-174u.onrender.com**. Free instances sleep after about 15 idle minutes and take about 50 s to wake. Give it a **persistent disk** for the room save file; on a host with an ephemeral disk, rooms won't survive a redeploy.
+The repo includes a Render Blueprint ([`render.yaml`](render.yaml)) for one free web service. It's live at **https://playcircle-in.onrender.com**, in Render's Singapore region (closest to India). Free instances sleep after about 15 idle minutes and take about 50 s to wake. Give it a **persistent disk** for the room save file; on a host with an ephemeral disk, rooms won't survive a redeploy.
 
 If it runs behind a reverse proxy (as it does on most of these hosts), set `TRUST_PROXY=1`. Otherwise every visitor shares the proxy's address and one person's wrong password guesses use up everyone's per-address allowance. Leave it unset when nothing sits in front of the server, or clients could fake their address with an `X-Forwarded-For` header.
 

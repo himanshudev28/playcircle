@@ -6,7 +6,7 @@ import org.webrtc.PeerConnection
 
 /** What the room page asked for when it tapped Share → Entire screen. */
 data class ShareRequest(
-    /** Realtime (Socket.IO) server, e.g. https://playcircle-174u.onrender.com */
+    /** Realtime (Socket.IO) server, e.g. https://playcircle-in.onrender.com */
     val server: String,
     val code: String,
     val name: String,

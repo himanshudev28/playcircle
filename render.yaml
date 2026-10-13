@@ -19,7 +19,7 @@ services:
         value: "1"
       # Canonical links / social previews (read at build time).
       - key: NEXT_PUBLIC_SITE_URL
-        value: https://playcircle-174u.onrender.com
+        value: https://playcircle-in.onrender.com
       # TURN relay for calls and live sharing across networks (see
       # app/api/ice/route.ts): ExpressTURN's free tier. The login is set in
       # the dashboard, never committed.
