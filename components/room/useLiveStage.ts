@@ -23,6 +23,7 @@ import { iceServers } from "@/lib/ice";
 import {
   onNativeToast,
   setNativeCap,
+  setNativeVoice,
   startNativeShare,
   stopNativeShare,
   useInNativeApp,
@@ -100,6 +101,8 @@ export type LiveStageApi = {
   isPresenter: boolean;
   /** Presenting through the Android app: no preview or stats on this page. */
   native: boolean;
+  /** Android app share: whether its sound / the mic goes out too. */
+  nativeAudio: { sound: boolean; voice: boolean; setVoice: (on: boolean) => void } | null;
   status: "idle" | "starting" | "connecting" | "live" | "failed";
   /** Viewer: the presenter's stream. */
   remoteStream: MediaStream | null;
@@ -1710,6 +1713,10 @@ export function useLiveStage({
       supported,
       isPresenter: !!pres || native,
       native: !pres && native,
+      nativeAudio:
+        !pres && native
+          ? { sound: nativeShare.sound, voice: nativeShare.voice, setVoice: setNativeVoice }
+          : null,
       status,
       remoteStream,
       localPreview: pres?.preview ?? null,
@@ -1737,6 +1744,8 @@ export function useLiveStage({
       pres,
       native,
       nativeShare.viewers,
+      nativeShare.sound,
+      nativeShare.voice,
       status,
       remoteStream,
       engine,

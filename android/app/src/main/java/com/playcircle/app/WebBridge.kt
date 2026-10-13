@@ -23,6 +23,12 @@ class WebBridge(private val activity: MainActivity) {
         activity.runOnUiThread { activity.setShareCap(level) }
     }
 
+    /** Mix the microphone into the shared sound. */
+    @JavascriptInterface
+    fun setShareVoice(on: Boolean) {
+        activity.runOnUiThread { activity.setShareVoice(on) }
+    }
+
     @JavascriptInterface
     fun getShareState(): String = ShareState.toJson(ShareState.current)
 

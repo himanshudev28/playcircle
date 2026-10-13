@@ -116,10 +116,14 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-    // Notifications are how Android shows (and lets you stop) the share; a
-    // "no" still lets sharing run, just without the notification.
-    private val notificationLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+    // Notifications show (and stop) the share; the microphone permission is
+    // what Android files capturing other apps' sound under. A "no" to
+    // either still shares the picture.
+    private val sharePermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+            if (result[Manifest.permission.RECORD_AUDIO] == false) {
+                ShareState.message("Sharing without sound — allow the microphone to include it")
+            }
             askForProjection()
         }
 
@@ -366,13 +370,14 @@ class MainActivity : ComponentActivity() {
         }
         pendingShare = json
         ShareState.update(ShareState.Snapshot(ShareState.Phase.STARTING, null, 0))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            !granted(Manifest.permission.POST_NOTIFICATIONS)
-        ) {
-            notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            askForProjection()
-        }
+        val wanted = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) add(Manifest.permission.RECORD_AUDIO)
+        }.filter { !granted(it) }
+        if (wanted.isEmpty()) askForProjection()
+        else sharePermissionLauncher.launch(wanted.toTypedArray())
     }
 
     private fun askForProjection() {
@@ -395,6 +400,11 @@ class MainActivity : ComponentActivity() {
     fun stopScreenShare() {
         if (!isOurs(webView.url)) return
         ScreenShareService.stop(this)
+    }
+
+    fun setShareVoice(on: Boolean) {
+        if (!isOurs(webView.url)) return
+        ScreenShareService.setVoice(this, on)
     }
 
     fun setShareCap(level: String) {

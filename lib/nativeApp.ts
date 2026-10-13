@@ -18,6 +18,7 @@ type Bridge = {
   startScreenShare(json: string): void;
   stopScreenShare(): void;
   setShareCap(level: string): void;
+  setShareVoice?(on: boolean): void;
   getShareState(): string;
 };
 
@@ -26,9 +27,19 @@ export type NativeShareState = {
   /** Set once the server accepted the share. */
   streamId: string | null;
   viewers: number;
+  /** Other apps' sound goes with the picture (needs the mic permission). */
+  sound: boolean;
+  /** The phone's microphone is mixed in. */
+  voice: boolean;
 };
 
-const IDLE: NativeShareState = { phase: "idle", streamId: null, viewers: 0 };
+const IDLE: NativeShareState = {
+  phase: "idle",
+  streamId: null,
+  viewers: 0,
+  sound: false,
+  voice: false,
+};
 const EVENT = "playcircle-native";
 
 function bridge(): Bridge | null {
@@ -47,7 +58,9 @@ function set(next: NativeShareState) {
   if (
     next.phase === state.phase &&
     next.streamId === state.streamId &&
-    next.viewers === state.viewers
+    next.viewers === state.viewers &&
+    next.sound === state.sound &&
+    next.voice === state.voice
   ) {
     return;
   }
@@ -63,6 +76,8 @@ function parse(raw: unknown): NativeShareState | null {
     phase,
     streamId: typeof r.streamId === "string" ? r.streamId : null,
     viewers: typeof r.viewers === "number" ? r.viewers : 0,
+    sound: r.sound === true,
+    voice: r.voice === true,
   };
 }
 
@@ -127,7 +142,7 @@ export async function startNativeShare(opts: {
   ensureStarted();
   // Starting right away: the stage is about to go live under the app's
   // connection, and this page must not try to watch it.
-  set({ phase: "starting", streamId: null, viewers: 0 });
+  set({ ...IDLE, phase: "starting" });
   const seq = ++startSeq;
   const iceServers = await prefetchIce();
   if (seq !== startSeq) return; // cancelled meanwhile
@@ -142,6 +157,10 @@ export function stopNativeShare() {
   startSeq++;
   if (state.phase === "starting" && !state.streamId) set(IDLE);
   bridge()?.stopScreenShare();
+}
+
+export function setNativeVoice(on: boolean) {
+  bridge()?.setShareVoice?.(on);
 }
 
 export function setNativeCap(level: string) {

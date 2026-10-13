@@ -49,9 +49,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.webkit:webkit:1.12.1")
-    // Google stopped publishing WebRTC for Android; this is the maintained
-    // build of the same org.webrtc API.
-    implementation("io.getstream:stream-webrtc-android:1.3.10")
+    // Google stopped publishing WebRTC for Android; this is LiveKit's
+    // maintained build of the same org.webrtc API. Its audio record hook
+    // (AudioBufferCallback) is what lets a share carry other apps' sound.
+    implementation("io.github.webrtc-sdk:android:144.7559.15")
     // Socket.IO v4 server ↔ Java client 2.x. Android already ships org.json.
     implementation("io.socket:socket.io-client:2.1.2") {
         exclude(group = "org.json", module = "json")

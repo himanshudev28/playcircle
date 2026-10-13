@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.Manifest
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.os.Build
@@ -28,6 +30,8 @@ class ScreenShareService : Service() {
         private const val ACTION_START = "com.playcircle.app.START"
         private const val ACTION_STOP = "com.playcircle.app.STOP"
         private const val ACTION_CAP = "com.playcircle.app.CAP"
+        private const val ACTION_VOICE = "com.playcircle.app.VOICE"
+        private const val EXTRA_VOICE = "voice"
         private const val EXTRA_DATA = "data"
         private const val EXTRA_REQUEST = "request"
         private const val EXTRA_CAP = "cap"
@@ -52,6 +56,15 @@ class ScreenShareService : Service() {
                 return
             }
             ctx.startService(Intent(ctx, ScreenShareService::class.java).setAction(ACTION_STOP))
+        }
+
+        fun setVoice(ctx: Context, on: Boolean) {
+            if (!running) return
+            ctx.startService(
+                Intent(ctx, ScreenShareService::class.java)
+                    .setAction(ACTION_VOICE)
+                    .putExtra(EXTRA_VOICE, on)
+            )
         }
 
         fun setCap(ctx: Context, level: String) {
@@ -87,6 +100,7 @@ class ScreenShareService : Service() {
             ACTION_START -> begin(intent)
             ACTION_STOP -> presenter?.stop() ?: finish()
             ACTION_CAP -> intent.getStringExtra(EXTRA_CAP)?.let { presenter?.setCap(it) }
+            ACTION_VOICE -> presenter?.setVoice(intent.getBooleanExtra(EXTRA_VOICE, false))
             else -> if (presenter == null) finish()
         }
         return START_NOT_STICKY
@@ -97,16 +111,18 @@ class ScreenShareService : Service() {
         if (presenter == null && req != null) roomCode = req.code
         // Foreground first: Android 14+ refuses the projection otherwise.
         val starting = ShareState.Snapshot(ShareState.Phase.STARTING, null, 0)
-        ServiceCompat.startForeground(
-            this,
-            NOTIFICATION_ID,
-            build(starting),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            } else {
-                0
-            }
-        )
+        // With sound, WebRTC records (and we replace) the microphone, which
+        // Android 14+ only allows in the background for a "microphone" service.
+        val withSound = checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        var type = 0
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        }
+        if (withSound && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        }
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, build(starting), type)
         running = true
         if (presenter != null) return // already sharing
 
@@ -116,7 +132,7 @@ class ScreenShareService : Service() {
             finish()
             return
         }
-        presenter = StagePresenter(applicationContext, req, data) {
+        presenter = StagePresenter(applicationContext, req, data, withSound) {
             main.post {
                 presenter = null
                 finish()

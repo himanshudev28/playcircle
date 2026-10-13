@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.hardware.display.DisplayManager
 import android.media.projection.MediaProjection
+import android.os.Build
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
@@ -12,6 +13,8 @@ import io.socket.client.IO
 import io.socket.client.Socket
 import io.socket.engineio.client.transports.WebSocket
 import org.json.JSONObject
+import org.webrtc.AudioSource
+import org.webrtc.AudioTrack
 import org.webrtc.DefaultVideoDecoderFactory
 import org.webrtc.DefaultVideoEncoderFactory
 import org.webrtc.EglBase
@@ -27,6 +30,7 @@ import org.webrtc.SessionDescription
 import org.webrtc.SurfaceTextureHelper
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
+import org.webrtc.audio.JavaAudioDeviceModule
 import java.net.URI
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
@@ -56,6 +60,8 @@ class StagePresenter(
     private val context: Context,
     private val req: ShareRequest,
     private val projectionData: Intent,
+    /** RECORD_AUDIO granted: other apps' sound goes with the picture. */
+    private val withSound: Boolean,
     /** Called once, after everything is torn down. */
     private val onEnded: () -> Unit,
 ) {
@@ -79,6 +85,9 @@ class StagePresenter(
             else -> 720
         }
 
+        /** Opus for music rather than speech. */
+        const val AUDIO_BITRATE = 96_000
+
         fun bitrateFor(height: Int): Int = when {
             height <= 480 -> 1_200_000
             height <= 720 -> 2_500_000
@@ -92,6 +101,7 @@ class StagePresenter(
     private class Peer(val n: Int) {
         lateinit var pc: PeerConnection
         lateinit var videoTx: RtpTransceiver
+        lateinit var audioTx: RtpTransceiver
         val queued = mutableListOf<IceCandidate>()
         var remoteSet = false
         var connected = false
@@ -105,6 +115,10 @@ class StagePresenter(
     private var textureHelper: SurfaceTextureHelper? = null
     private var source: VideoSource? = null
     private var track: VideoTrack? = null
+    private var adm: JavaAudioDeviceModule? = null
+    private var appAudio: AppAudioCapture? = null
+    private var audioSource: AudioSource? = null
+    private var audioTrack: AudioTrack? = null
     private var captureShort = 720
     private var captureSize = 0 to 0
 
@@ -148,6 +162,12 @@ class StagePresenter(
         for (id in peers.keys) applyParams(id)
     }
 
+    /** Mix the microphone into the app sound (talk over what you show). */
+    fun setVoice(on: Boolean) = onThread {
+        appAudio?.includeVoice = on
+        publish()
+    }
+
     /** The screen rotated or changed size: keep the picture undistorted. */
     fun onDisplayChanged() = onThread { resizeCapture() }
 
@@ -175,7 +195,21 @@ class StagePresenter(
                 .createInitializationOptions()
         )
         val egl = EglBase.create().also { this.egl = it }
+        // The "microphone" WebRTC records is replaced by the app sound in
+        // AppAudioCapture's hook — so no hardware voice processing on it.
+        val sound = if (withSound && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            AppAudioCaptureHook()
+        } else {
+            null
+        }
+        val adm = JavaAudioDeviceModule.builder(context)
+            .setUseHardwareAcousticEchoCanceler(false)
+            .setUseHardwareNoiseSuppressor(false)
+            .apply { if (sound != null) setAudioBufferCallback(sound) }
+            .createAudioDeviceModule()
+            .also { this.adm = it }
         val factory = PeerConnectionFactory.builder()
+            .setAudioDeviceModule(adm)
             .setVideoEncoderFactory(DefaultVideoEncoderFactory(egl.eglBaseContext, true, true))
             .setVideoDecoderFactory(DefaultVideoDecoderFactory(egl.eglBaseContext))
             .createPeerConnectionFactory()
@@ -197,6 +231,45 @@ class StagePresenter(
         captureSize = w to h
         capturer.startCapture(w, h, FPS)
         track = factory.createVideoTrack("screen", source)
+
+        // App sound rides the same projection as the picture.
+        val projection = capturer.projection
+        if (sound != null && projection != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            sound.target = AppAudioCapture(projection).also { appAudio = it }
+            // Music, not a call: no echo cancelling, gain riding or denoising.
+            val constraints = MediaConstraints().apply {
+                for (k in listOf(
+                    "googEchoCancellation", "googAutoGainControl", "googNoiseSuppression",
+                    "googHighpassFilter", "googTypingNoiseDetection",
+                )) {
+                    mandatory.add(MediaConstraints.KeyValuePair(k, "false"))
+                }
+            }
+            val audioSource = factory.createAudioSource(constraints).also { this.audioSource = it }
+            audioTrack = factory.createAudioTrack("screen-audio", audioSource)
+        }
+    }
+
+    /** Forwards WebRTC's record hook to the capture once it exists. */
+    private class AppAudioCaptureHook : JavaAudioDeviceModule.AudioBufferCallback {
+        @Volatile
+        var target: AppAudioCapture? = null
+
+        override fun onBuffer(
+            buffer: java.nio.ByteBuffer,
+            audioFormat: Int,
+            channelCount: Int,
+            sampleRate: Int,
+            bytesRead: Int,
+            captureTimeNs: Long,
+        ): Long {
+            val t = target ?: run {
+                // Not ready yet: send silence, never the raw microphone.
+                for (i in 0 until bytesRead) buffer.put(buffer.position() + i, 0)
+                return captureTimeNs
+            }
+            return t.onBuffer(buffer, audioFormat, channelCount, sampleRate, bytesRead, captureTimeNs)
+        }
     }
 
     /** The real screen, scaled so its short side fits the cap. */
@@ -481,12 +554,14 @@ class StagePresenter(
                 listOf("screen")
             )
         )
-        // Audio slot up front, like the web presenter: adding sound later is
-        // a track swap, never a renegotiation.
-        pc.addTransceiver(
-            MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO,
-            RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.SEND_ONLY)
+        // Audio slot up front, like the web presenter — with the app sound
+        // when there is some.
+        val audioInit = RtpTransceiver.RtpTransceiverInit(
+            RtpTransceiver.RtpTransceiverDirection.SEND_ONLY,
+            listOf("screen")
         )
+        peer.audioTx = audioTrack?.let { pc.addTransceiver(it, audioInit) }
+            ?: pc.addTransceiver(MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO, audioInit)
         peers[id] = peer
 
         pc.createOffer(object : SdpAdapter() {
@@ -567,6 +642,15 @@ class StagePresenter(
         enc.maxBitrateBps = bitrateFor(target)
         params.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
         sender.setParameters(params)
+
+        if (audioTrack != null) {
+            val audio = peer.audioTx.sender
+            val ap = audio.parameters
+            if (ap.encodings.isNotEmpty()) {
+                ap.encodings[0].maxBitrateBps = AUDIO_BITRATE
+                audio.setParameters(ap)
+            }
+        }
     }
 
     private fun signal(to: String, sid: String, data: JSONObject) {
@@ -594,7 +678,13 @@ class StagePresenter(
     private fun publish() {
         val sid = streamId ?: return
         val viewers = peers.values.count { it.connected }
-        ShareState.update(ShareState.Snapshot(ShareState.Phase.LIVE, sid, viewers))
+        ShareState.update(
+            ShareState.Snapshot(
+                ShareState.Phase.LIVE, sid, viewers,
+                sound = audioTrack != null,
+                voice = appAudio?.includeVoice == true,
+            )
+        )
     }
 
     /* ----------------------------------------------------------- teardown */
@@ -624,16 +714,24 @@ class StagePresenter(
         } catch (_: Exception) {
         }
         capturer?.dispose()
+        appAudio?.stop()
+        audioTrack?.dispose()
+        audioSource?.dispose()
         track?.dispose()
         source?.dispose()
         textureHelper?.dispose()
         factory?.dispose()
+        adm?.release()
         egl?.release()
         capturer = null
         track = null
         source = null
         textureHelper = null
         factory = null
+        adm = null
+        appAudio = null
+        audioTrack = null
+        audioSource = null
         egl = null
         ShareState.update(ShareState.IDLE, message)
         exec.shutdown()

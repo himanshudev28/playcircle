@@ -280,7 +280,7 @@ function PresenterView({ api, media }: { api: LiveStageApi; media: LiveMedia }) 
 // The Android app captures and sends the phone screen itself, so this page
 // has no preview — showing one would mirror the screen into itself.
 function NativePresenterView({ api, media }: { api: LiveStageApi; media: LiveMedia }) {
-  const { status, viewerCount, cap, setCap, stopShare } = api;
+  const { status, viewerCount, cap, setCap, stopShare, nativeAudio } = api;
   const watching = viewerCount === 1 ? "1 watching" : `${viewerCount} watching`;
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-ink px-6 text-center">
@@ -303,10 +303,32 @@ function NativePresenterView({ api, media }: { api: LiveStageApi; media: LiveMed
             </span>
           </span>
           <p className="max-w-xs text-xs text-smoke">
-            Open any app — everyone sees what&apos;s on your screen. Come back here or use
-            the notification to stop.
+            Open any app — everyone sees what&apos;s on your screen
+            {nativeAudio?.sound ? " and hears its sound" : ""}. Come back here or use the
+            notification to stop.
           </p>
-          <div className="flex items-center gap-2">
+          {nativeAudio && !nativeAudio.sound && (
+            <p className="max-w-xs text-xs text-smoke">
+              No sound: allow PlayCircle the microphone in Android settings to share it.
+            </p>
+          )}
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            {nativeAudio?.sound && (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={nativeAudio.voice}
+                onClick={() => nativeAudio.setVoice(!nativeAudio.voice)}
+                className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                  nativeAudio.voice
+                    ? "border-signal bg-signal/15 text-bone"
+                    : "border-edge text-smoke hover:bg-bone/5"
+                }`}
+              >
+                <Icon name="mic" size={13} />
+                {nativeAudio.voice ? "My voice: on" : "My voice: off"}
+              </button>
+            )}
             <QualityMenu label="Max quality" value={cap} onChange={setCap} />
             <button
               onClick={stopShare}

@@ -35,7 +35,9 @@ class ScreenCapturer(
     private var helper: SurfaceTextureHelper? = null
     private var context: Context? = null
     private var observer: CapturerObserver? = null
-    private var projection: MediaProjection? = null
+    /** Set once capture starts; app sound is captured on the same one. */
+    var projection: MediaProjection? = null
+        private set
     private var display: VirtualDisplay? = null
     private var width = 0
     private var height = 0

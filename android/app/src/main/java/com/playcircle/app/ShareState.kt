@@ -12,7 +12,15 @@ import org.json.JSONObject
 object ShareState {
     enum class Phase(val wire: String) { IDLE("idle"), STARTING("starting"), LIVE("live") }
 
-    data class Snapshot(val phase: Phase, val streamId: String?, val viewers: Int)
+    data class Snapshot(
+        val phase: Phase,
+        val streamId: String?,
+        val viewers: Int,
+        /** Other apps' sound is being shared too. */
+        val sound: Boolean = false,
+        /** The microphone is mixed in. */
+        val voice: Boolean = false,
+    )
 
     val IDLE = Snapshot(Phase.IDLE, null, 0)
 
@@ -50,6 +58,8 @@ object ShareState {
             put("phase", s.phase.wire)
             put("streamId", s.streamId ?: JSONObject.NULL)
             put("viewers", s.viewers)
+            put("sound", s.sound)
+            put("voice", s.voice)
             if (message != null) put("message", message)
         }.toString()
 }
