@@ -4,11 +4,13 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.PictureInPictureParams
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
@@ -16,6 +18,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
+import android.util.Rational
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -93,8 +96,14 @@ class MainActivity : ComponentActivity() {
     private var pendingShare: String? = null
     private var fileCallback: ValueCallback<Array<Uri>>? = null
     private var pendingPermission: PermissionRequest? = null
+    /** The page is in a call: leaving the app goes picture-in-picture. */
+    private var callPip = false
+    /** We're opening another screen ourselves (link, picker, dialog): that's
+        not the user leaving, so no PiP until we're back. */
+    private var pipSuppressed = false
 
     private val onShareState: (ShareState.Snapshot, String?) -> Unit = { s, msg ->
+        updatePipParams() // no call pop-up over your own screen share
         val json = ShareState.toJson(s, msg)
         webView.evaluateJavascript(
             "window.dispatchEvent(new CustomEvent('playcircle-native',{detail:$json}))",
@@ -200,6 +209,24 @@ class MainActivity : ComponentActivity() {
         webView.saveState(outState)
     }
 
+    override fun onResume() {
+        super.onResume()
+        pipSuppressed = false
+        updatePipParams()
+    }
+
+    // Swiping the PiP window away only stops the activity; the call would
+    // carry on with Android cutting the camera. Tell the page to hang up.
+    override fun onStop() {
+        if (isInPictureInPictureMode) {
+            webView.evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent('playcircle-pip',{detail:{on:false,closed:true}}))",
+                null
+            )
+        }
+        super.onStop()
+    }
+
     override fun onDestroy() {
         ShareState.unlisten(onShareState)
         webView.destroy()
@@ -246,6 +273,13 @@ class MainActivity : ComponentActivity() {
                 return true
             }
 
+            // A new page (reload, navigation) starts with no call: whatever
+            // the old page said about PiP no longer holds.
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                callPip = false
+                updatePipParams()
+            }
+
             override fun onPageFinished(view: WebView, url: String) {
                 loading.visibility = View.GONE
                 // Older WebViews without document-start scripts.
@@ -277,6 +311,7 @@ class MainActivity : ComponentActivity() {
                 fileCallback?.onReceiveValue(null)
                 fileCallback = callback
                 return try {
+                    suppressPip()
                     fileLauncher.launch(params.createIntent())
                     true
                 } catch (_: ActivityNotFoundException) {
@@ -306,6 +341,7 @@ class MainActivity : ComponentActivity() {
 
     private fun openExternal(uri: Uri) {
         try {
+            suppressPip()
             startActivity(Intent(Intent.ACTION_VIEW, uri))
         } catch (_: ActivityNotFoundException) {
             Toast.makeText(this, "No app can open that link", Toast.LENGTH_SHORT).show()
@@ -333,6 +369,7 @@ class MainActivity : ComponentActivity() {
         } else {
             pendingPermission?.deny()
             pendingPermission = request
+            suppressPip()
             mediaPermissionLauncher.launch(needed.toTypedArray())
         }
     }
@@ -377,7 +414,10 @@ class MainActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) add(Manifest.permission.RECORD_AUDIO)
         }.filter { !granted(it) }
         if (wanted.isEmpty()) askForProjection()
-        else sharePermissionLauncher.launch(wanted.toTypedArray())
+        else {
+            suppressPip()
+            sharePermissionLauncher.launch(wanted.toTypedArray())
+        }
     }
 
     private fun askForProjection() {
@@ -390,11 +430,78 @@ class MainActivity : ComponentActivity() {
             mpm.createScreenCaptureIntent()
         }
         try {
+            suppressPip()
             projectionLauncher.launch(intent)
         } catch (_: ActivityNotFoundException) {
             pendingShare = null
             ShareState.update(ShareState.IDLE, "This phone can't share its screen")
         }
+    }
+
+    /* -------------------------------------------- picture-in-picture */
+
+    fun setCallPip(on: Boolean) {
+        // Turning it off is always allowed, whichever page asks.
+        if (on && !isOurs(webView.url)) return
+        callPip = on
+        updatePipParams()
+    }
+
+    /** In a call, not sharing your screen (the camera window would be in
+        the share), and not opening a screen of our own. */
+    private fun pipWanted() =
+        callPip && !pipSuppressed && ShareState.current.phase == ShareState.Phase.IDLE
+
+    private fun suppressPip() {
+        pipSuppressed = true
+        updatePipParams()
+    }
+
+    private fun pipSupported() =
+        packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    private fun pipParams(): PictureInPictureParams =
+        PictureInPictureParams.Builder()
+            // Portrait-ish: faces, not a movie frame.
+            .setAspectRatio(Rational(3, 4))
+            .apply {
+                // Android 12+: swipe home goes straight into PiP.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    setAutoEnterEnabled(pipWanted())
+                    setSeamlessResizeEnabled(false)
+                }
+            }
+            .build()
+
+    private fun updatePipParams() {
+        if (!pipSupported()) return
+        try {
+            setPictureInPictureParams(pipParams())
+        } catch (_: IllegalStateException) {
+            /* PiP turned off for the app in system settings */
+        }
+    }
+
+    // Android 8–11 (12+ enters on its own via setAutoEnterEnabled).
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (!pipWanted() || !pipSupported() || Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) return
+        try {
+            enterPictureInPictureMode(pipParams())
+        } catch (_: IllegalStateException) {
+            /* PiP turned off for the app in system settings */
+        }
+    }
+
+    // The page swaps to a cameras-only layout while the window is small.
+    override fun onPictureInPictureModeChanged(inPip: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(inPip, newConfig)
+        // A video in full screen would fill the window instead of the cameras.
+        if (inPip) fullscreenCallback?.onCustomViewHidden()
+        webView.evaluateJavascript(
+            "window.dispatchEvent(new CustomEvent('playcircle-pip',{detail:{on:$inPip}}))",
+            null
+        )
     }
 
     fun stopScreenShare() {
@@ -429,6 +536,7 @@ class MainActivity : ComponentActivity() {
             .setType("text/plain")
             .putExtra(Intent.EXTRA_TEXT, body)
             .apply { if (title.isNotBlank()) putExtra(Intent.EXTRA_SUBJECT, title) }
+        suppressPip()
         startActivity(Intent.createChooser(send, title.ifBlank { "Share" }))
     }
 

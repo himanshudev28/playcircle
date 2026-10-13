@@ -11,6 +11,7 @@ const path = require("path");
 const { promisify } = require("util");
 const { createLimiter, createSharedLimiter, str, num, oneOf, safe, ROOM_CODE } = require("./limits");
 const media = require("./media");
+const { resolve: resolveLink } = require("./resolve");
 const { createStore } = require("./persist");
 const registerQueue = require("./queue");
 const registerSocial = require("./social");
@@ -64,6 +65,13 @@ const DEFAULTS = {
   // Behind a reverse proxy every socket shares the proxy's address; set
   // TRUST_PROXY=1 to key the per-address limits on X-Forwarded-For instead.
   trustProxy: process.env.TRUST_PROXY === "1",
+  // Turning a pasted link into a video fetches other sites, so it's
+  // limited per socket and per client address: [max, perMs].
+  resolvePerSocket: [6, 20_000],
+  resolvePerAddress: [30, 60_000],
+  // Passed to server/resolve.js. Tests set { allowPrivate: true } to fetch
+  // fixtures from 127.0.0.1; never in production.
+  resolveOptions: {},
 };
 
 // A believable video length in seconds, or null. A live stream's player
@@ -130,6 +138,7 @@ function attachRealtime(io, options = {}) {
       isPublic: false,
       createdAt: Date.now(),
       media: null, // see server/media.js
+      mediaGen: 0, // bumps every time the stage changes (setMedia)
       isPlaying: false,
       time: 0, // playhead position (seconds) as of updatedAt
       updatedAt: Date.now(),
@@ -426,7 +435,7 @@ function attachRealtime(io, options = {}) {
   const detachHooks = []; // (room, socketId, user) => void, after someone leaves
   const joinHooks = []; // (room, socketId) => void, after someone is admitted
 
-  // Only timed (YouTube) media goes in history: a live share can't replay.
+  // Only timed media goes in history: a live share can't replay.
   function pushHistory(room, m) {
     if (!media.isTimed(m)) return;
     const k = media.key(m);
@@ -452,6 +461,7 @@ function attachRealtime(io, options = {}) {
     const sameVideo = !!next && media.key(next) === media.key(prev);
     pushHistory(room, prev);
     room.media = next;
+    room.mediaGen = (room.mediaGen || 0) + 1;
     room.time = 0;
     room.isPlaying = !!next && playing;
     room.updatedAt = Date.now();
@@ -476,7 +486,7 @@ function attachRealtime(io, options = {}) {
     for (const hook of mediaHooks) hook(room, prev);
     if (room.isPublic) broadcastLobby();
 
-    if (media.isTimed(next) && !next.title) {
+    if (media.needsEnrich(next)) {
       media.enrich(next).then(() => {
         if (room.media !== next || rooms.get(room.code) !== room) return;
         io.to(room.code).emit("room:media", next);
@@ -695,6 +705,49 @@ function attachRealtime(io, options = {}) {
     );
   }
 
+  /* ---- Pasted links ----
+     A YouTube link is recognised on the spot. Anything else may mean
+     fetching other sites (server/resolve.js), so it's rate limited per
+     socket and per address, and takes a moment: callers must re-check
+     everything they checked before once it's back. */
+
+  const LINK_ERRORS = {
+    empty: "Paste a link to a video",
+    tooLong: "That link is too long",
+    slow: "Slow down a little",
+  };
+
+  // → Promise<{ media } | { error }>
+  async function resolveInput(socket, input) {
+    if (typeof input !== "string" || !input.trim()) return { error: LINK_ERRORS.empty };
+    const text = input.trim();
+    if (text.length > 2000) return { error: LINK_ERRORS.tooLong };
+    const quick = media.parseInput(text);
+    if (quick) return { media: quick };
+    if (
+      !socket.data.allow("resolve", ...opts.resolvePerSocket) ||
+      !shared.allow(`resolve-addr:${clientAddress(socket)}`, ...opts.resolvePerAddress)
+    ) {
+      return { error: LINK_ERRORS.slow };
+    }
+    const out = await resolveLink(text, opts.resolveOptions);
+    return out && !out.error ? { media: out } : { error: out?.error || "Couldn't reach that site" };
+  }
+
+  // Media a client named by its identity alone ({ kind, id } …) gets its
+  // title etc. from what the room already knows about it (on stage, queued
+  // or played before), never from the client.
+  function withKnownInfo(room, m) {
+    const k = media.key(m);
+    const known = [
+      room.media,
+      ...room.queue.map((q) => q.media),
+      ...room.history.map((h) => h.media),
+    ].find((x) => x && media.isTimed(x) && media.key(x) === k);
+    if (known) Object.assign(m, media.infoFrom(known));
+    return m;
+  }
+
   /* ---- Shared context for feature modules ---- */
 
   const ctx = {
@@ -722,6 +775,8 @@ function attachRealtime(io, options = {}) {
     broadcastLobby,
     setMedia,
     handleEnded,
+    resolveInput,
+    withKnownInfo,
     onMedia: (fn) => mediaHooks.push(fn),
     onSettings: (fn) => settingsHooks.push(fn),
     onDetach: (fn) => detachHooks.push(fn),
@@ -788,15 +843,12 @@ function attachRealtime(io, options = {}) {
   const diskStr = (x, max) =>
     typeof x === "string" ? x.trim().slice(0, max) || null : null;
 
-  // Media from disk: only what fromClient accepts, plus its display text.
+  // Media from disk: only what fromClient accepts (any video kind, never a
+  // live share), plus its cleaned-up display info.
   function mediaFromDisk(x) {
-    const m = media.fromClient(x);
+    const m = media.fromClient(x, { allowPrivate: !!opts.resolveOptions?.allowPrivate });
     if (!m) return null;
-    for (const [field, max] of [["title", 120], ["author", 60], ["thumb", 300]]) {
-      const v = diskStr(x[field], max);
-      if (v) m[field] = v;
-    }
-    return m;
+    return Object.assign(m, media.infoFrom(x));
   }
 
   function queueItemFromDisk(q) {
@@ -1378,10 +1430,21 @@ function attachRealtime(io, options = {}) {
     });
 
     // ---- Playback ----
-    on("player:action", (p) => {
+    // { type: "load", input } resolves a pasted link and acks { ok } or
+    // { ok: false, error }; { type: "load", media } is checked on the spot.
+    on("player:action", async (p, reply, hasAck) => {
+      // A load always gets its ack (else the client waits it out and shows
+      // a misleading error); play/pause/seek have none to give.
+      const isLoad = p.type === "load";
       const room = roomOf(socket);
-      if (!room) return;
-      if (!allow("player", 12, 4_000)) return;
+      if (!room) {
+        if (isLoad) reply({ ok: false, error: "You're not in this room" });
+        return;
+      }
+      if (!allow("player", 12, 4_000)) {
+        if (isLoad) reply({ ok: false, error: "Slow down a little" });
+        return;
+      }
       const type = oneOf(p.type, ["load", "play", "pause", "seek"]);
       if (!type) return;
 
@@ -1395,16 +1458,46 @@ function attachRealtime(io, options = {}) {
           denied: true,
         });
 
+      // A load that didn't work: the ack says why (or, for a client that
+      // didn't ask for one, a notice).
+      const refuse = (error) =>
+        hasAck ? reply({ ok: false, error }) : socket.emit("room:notice", error);
+
       // Not allowed to drive: snap this viewer back to the room's position.
-      if (!effectivePerms(room, socket.id).video) return snapBack();
+      // (Checked before any link is resolved: no fetching on their behalf.)
+      if (!effectivePerms(room, socket.id).video) {
+        snapBack();
+        if (type === "load" && hasAck) refuse("Only the host can change the video");
+        return;
+      }
 
       if (type === "load") {
-        const next = media.fromClient(p.media) || media.parseInput(str(p.input, 2000));
-        if (!next) {
-          return socket.emit("room:notice", "That doesn't look like a YouTube link");
+        // Only the newest load a socket sent counts (a link still resolving
+        // doesn't land on top of something picked after it).
+        const seq = (socket.data.loadSeq = (socket.data.loadSeq || 0) + 1);
+        const ropts = { allowPrivate: !!opts.resolveOptions?.allowPrivate };
+        const why = media.refusal(p.media, ropts);
+        if (why) return refuse(why);
+        const direct = media.fromClient(p.media, ropts);
+        if (direct) {
+          setMedia(room, withKnownInfo(room, direct), { by: socket.id });
+          return reply({ ok: true });
         }
-        setMedia(room, next, { by: socket.id });
-        return;
+        const gen = room.mediaGen;
+        const out = await resolveInput(socket, p.input);
+        // That took a while: they may have left, lost the right, pasted
+        // something newer, or someone else changed the video meanwhile.
+        if (roomOf(socket) !== room) return reply({ ok: false, error: "You left the room" });
+        if (!effectivePerms(room, socket.id).video) {
+          return refuse("Only the host can change the video");
+        }
+        if (socket.data.loadSeq !== seq) {
+          return reply({ ok: false, error: "A newer link replaced this one" });
+        }
+        if (out.error) return refuse(out.error);
+        if (room.mediaGen !== gen) return refuse("The video changed while finding that link");
+        setMedia(room, out.media, { by: socket.id });
+        return reply({ ok: true });
       }
 
       // Play/pause/seek only make sense for the video that's on now; a stale

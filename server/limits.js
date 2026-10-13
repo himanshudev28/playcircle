@@ -76,18 +76,20 @@ function oneOf(v, list) {
   return list.includes(v) ? v : null;
 }
 
-// Wrap a handler: normalise the payload, pass a callable ack, and swallow
-// any exception (logged) instead of letting it take the process down. Async
-// handlers are covered too: a rejected promise is caught the same way.
+// Wrap a handler: normalise the payload, pass a callable ack (and whether
+// the client actually asked for one), and swallow any exception (logged)
+// instead of letting it take the process down. Async handlers are covered
+// too: a rejected promise is caught the same way.
 function safe(event, fn) {
   return (payload, ack) => {
-    const reply = typeof ack === "function" ? ack : () => {};
+    const hasAck = typeof ack === "function";
+    const reply = hasAck ? ack : () => {};
     const fail = (err) => {
       console.error(`[socket] ${event} handler failed:`, err);
       reply({ ok: false });
     };
     try {
-      const out = fn(obj(payload), reply);
+      const out = fn(obj(payload), reply, hasAck);
       if (out && typeof out.then === "function") out.then(undefined, fail);
     } catch (err) {
       fail(err);

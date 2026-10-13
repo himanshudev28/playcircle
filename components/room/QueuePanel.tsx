@@ -10,8 +10,9 @@ import {
   type QueueReply,
   type QueueState,
   type RoomSettings,
-  type YoutubeMedia,
+  type VideoMedia,
 } from "@/lib/socket";
+import { MediaThumb, SourceBadge, mediaTitle } from "./mediaInfo";
 
 /* "Up next": the room's shared watch queue.
    - Anyone allowed to chat can suggest. With approval on, suggestions from
@@ -22,6 +23,9 @@ import {
      emits; the server enforces every permission and decides what to show. */
 
 const ACK_TIMEOUT = 8000;
+/** A pasted link is resolved on the server (it may fetch the page, up to
+    ~12 s), so `{ input }` adds wait longer before calling it unreachable. */
+const RESOLVE_TIMEOUT = 20000;
 
 export function QueuePanel({
   queue,
@@ -70,11 +74,11 @@ export function QueuePanel({
 
   // `done(ok)` lets the add box keep the link when the add didn't land.
   function add(
-    payload: { input: string } | { media: YoutubeMedia },
+    payload: { input: string } | { media: VideoMedia },
     done?: (ok: boolean) => void
   ) {
     getSocket()
-      .timeout(ACK_TIMEOUT)
+      .timeout("input" in payload ? RESOLVE_TIMEOUT : ACK_TIMEOUT)
       .emit("queue:add", payload, (err: Error | null, res?: QueueReply) => {
         done?.(!err && !!res?.ok);
         if (err || !res) return onToast("Couldn't reach the room — try again");
@@ -184,7 +188,7 @@ export function QueuePanel({
           <History
             history={queue.history.slice(0, 12)}
             canSuggest={canSuggest}
-            isBlocked={(m: YoutubeMedia) => {
+            isBlocked={(m: VideoMedia) => {
               const k = mediaKey(m);
               return k === playingKey || queuedKeys.has(k);
             }}
@@ -249,10 +253,10 @@ function AddBox({
           value={value}
           onChange={(e) => setValue(e.target.value)}
           disabled={!canSuggest}
-          aria-label="YouTube link to suggest"
+          aria-label="Video link to suggest"
           placeholder={
             canSuggest
-              ? "Paste a YouTube link to suggest…"
+              ? "Paste a video link to suggest…"
               : "The host turned off your suggestions"
           }
           maxLength={2000}
@@ -263,7 +267,7 @@ function AddBox({
           disabled={!canSuggest || busy || !value.trim()}
           className="rounded-card bg-signal px-4 py-2.5 text-sm font-semibold transition hover:bg-signal-hot focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal active:scale-95 disabled:pointer-events-none disabled:opacity-40"
         >
-          {busy ? "Adding…" : "Add"}
+          {busy ? "Finding…" : "Add"}
         </button>
       </form>
       {hint && canSuggest && (
@@ -317,13 +321,16 @@ function NowPlaying({
         </div>
       ) : media ? (
         <div className="flex items-center gap-3">
-          <Thumb media={media} width={72} />
+          <MediaThumb media={media} width={72} />
           <div className="min-w-0 flex-1">
             <p className="line-clamp-2 text-sm font-medium leading-snug">
-              {media.title || "Untitled video"}
+              {mediaTitle(media)}
             </p>
-            {media.author && (
-              <p className="mt-0.5 truncate text-xs text-smoke">{media.author}</p>
+            {(media.author || media.kind !== "youtube") && (
+              <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-smoke">
+                <SourceBadge media={media} />
+                {media.author && <span className="truncate">{media.author}</span>}
+              </p>
             )}
           </div>
           {canControl && (
@@ -387,7 +394,7 @@ function ReadyRow({
   isOwn: boolean;
   onMove: (dir: -1 | 1) => void;
 }) {
-  const title = item.media.title || null;
+  const title = rowTitle(item.media);
   const name = title || "this video";
   const hasMenu = canPlay || canMove || canRemove;
 
@@ -396,7 +403,7 @@ function ReadyRow({
       <span className="tnum w-4 shrink-0 text-center text-xs text-dim">
         {position}
       </span>
-      <Thumb media={item.media} width={96} />
+      <MediaThumb media={item.media} width={96} />
       <div className="min-w-0 flex-1">
         {item.next ? (
           <p
@@ -422,6 +429,7 @@ function ReadyRow({
           {title || "Loading title…"}
         </p>
         <p className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-smoke">
+          <SourceBadge media={item.media} />
           <span
             aria-hidden
             className="h-1.5 w-1.5 shrink-0 rounded-full"
@@ -518,14 +526,14 @@ function PendingRow({
   isAdmin: boolean;
   canPlay: boolean;
 }) {
-  const title = item.media.title || null;
+  const title = rowTitle(item.media);
   const name = title || "this video";
   const emit = (event: string) => getSocket().emit(event, { id: item.id });
 
   return (
     <li className="rounded-card border border-edge bg-film-2 px-2 py-2">
       <div className="flex items-center gap-2.5">
-        <Thumb media={item.media} width={80} />
+        <MediaThumb media={item.media} width={80} />
         <div className="min-w-0 flex-1">
           <p
             className={`line-clamp-2 text-sm leading-snug ${
@@ -535,6 +543,7 @@ function PendingRow({
             {title || "Loading title…"}
           </p>
           <p className="mt-0.5 flex items-center gap-1.5 truncate text-xs text-smoke">
+            <SourceBadge media={item.media} />
             <span
               aria-hidden
               className="h-1.5 w-1.5 shrink-0 rounded-full"
@@ -604,8 +613,8 @@ function EmptyState({
       <p className="mt-3 text-sm font-medium">Nothing up next</p>
       <p className="mt-1 max-w-[17rem] text-xs leading-relaxed text-smoke">
         {canSuggest
-          ? "Paste a YouTube link above — anyone here can suggest, and everyone votes on what plays first."
-          : "Anyone allowed to suggest can add a YouTube link, and everyone votes on what plays first."}{" "}
+          ? "Paste a video link above — anyone here can suggest, and everyone votes on what plays first."
+          : "Anyone allowed to suggest can add a video link, and everyone votes on what plays first."}{" "}
         {settings.autoplay
           ? "The top pick starts on its own when this video ends."
           : "The host starts the next one when it's time."}
@@ -623,9 +632,9 @@ function History({
 }: {
   history: QueueState["history"];
   canSuggest: boolean;
-  isBlocked: (m: YoutubeMedia) => boolean;
-  isPlaying: (m: YoutubeMedia) => boolean;
-  onRequeue: (m: YoutubeMedia) => void;
+  isBlocked: (m: VideoMedia) => boolean;
+  isPlaying: (m: VideoMedia) => boolean;
+  onRequeue: (m: VideoMedia) => void;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -650,16 +659,19 @@ function History({
           {history.map((h) => {
             const playing = isPlaying(h.media);
             const blocked = isBlocked(h.media);
-            const name = h.media.title || "Untitled video";
+            const name = mediaTitle(h.media);
             return (
               <li
-                key={`${h.media.id}-${h.playedAt}`}
+                key={`${mediaKey(h.media)}-${h.playedAt}`}
                 className="flex items-center gap-2.5 rounded-card px-2 py-1.5"
               >
-                <Thumb media={h.media} width={64} dim />
-                <p className="line-clamp-2 min-w-0 flex-1 text-xs leading-snug text-smoke">
-                  {name}
-                </p>
+                <MediaThumb media={h.media} width={64} dim />
+                <div className="min-w-0 flex-1">
+                  <p className="line-clamp-2 text-xs leading-snug text-smoke">
+                    {name}
+                  </p>
+                  <SourceBadge media={h.media} className="mt-0.5" />
+                </div>
                 {canSuggest &&
                   (blocked ? (
                     <span className="shrink-0 px-2 text-xs text-faint">
@@ -812,32 +824,11 @@ function ClearButton() {
 
 /* ---- Small pieces ------------------------------------------------ */
 
-function Thumb({
-  media,
-  width,
-  dim = false,
-}: {
-  media: YoutubeMedia;
-  width: number;
-  dim?: boolean;
-}) {
-  const src = media.thumb || `https://i.ytimg.com/vi/${media.id}/mqdefault.jpg`;
-  return (
-    <span
-      className="relative block aspect-video shrink-0 overflow-hidden rounded-lg bg-ink"
-      style={{ width }}
-    >
-      {/* Tiny, many, and already sized by YouTube — the optimizer adds nothing. */}
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src={src}
-        alt=""
-        loading="lazy"
-        decoding="async"
-        className={`h-full w-full object-cover ${dim ? "opacity-70" : ""}`}
-      />
-    </span>
-  );
+// A queue row's title. YouTube titles arrive a moment after the add (null
+// meanwhile: "Loading title…"); other sources name themselves from the link.
+function rowTitle(m: VideoMedia): string | null {
+  if (m.title) return m.title;
+  return m.kind === "youtube" ? null : mediaTitle(m);
 }
 
 function RowMenu({

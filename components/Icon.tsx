@@ -173,6 +173,12 @@ const PATHS = {
       <path d="M19.8 4.4v4.4h-4.4M4.2 19.6v-4.4h4.4" />
     </>
   ),
+  pip: (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2.4" />
+      <rect x="12" y="11.5" width="6.5" height="5" rx="1" />
+    </>
+  ),
   download: <path d="M12 3.6v11.6m-4.8-4.8L12 15.2l4.8-4.8M4.4 20.4h15.2" />,
 } as const;
 

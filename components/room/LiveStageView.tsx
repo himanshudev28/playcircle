@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Icon } from "@/components/Icon";
 import { getSocket, type LiveMedia, type StageQuality } from "@/lib/socket";
+import { useVoiceInCall } from "./useCall";
 import type { LiveStageApi, LiveStageStats } from "./useLiveStage";
 
 /* Fills the player box (the parent is `relative aspect-video`).
@@ -281,6 +282,22 @@ function PresenterView({ api, media }: { api: LiveStageApi; media: LiveMedia }) 
 // has no preview — showing one would mirror the screen into itself.
 function NativePresenterView({ api, media }: { api: LiveStageApi; media: LiveMedia }) {
   const { status, viewerCount, cap, setCap, stopShare, nativeAudio } = api;
+  // Your call already carries your voice: mixing the mic into the share too
+  // would send it twice, which everyone in the call hears as an echo.
+  // Switched back on once the call stops carrying your voice.
+  const voiceInCall = useVoiceInCall();
+  const shareVoice = !!nativeAudio?.voice;
+  const setShareVoice = nativeAudio?.setVoice;
+  const autoOff = useRef(false);
+  useEffect(() => {
+    if (voiceInCall && shareVoice) {
+      autoOff.current = true;
+      setShareVoice?.(false);
+    } else if (!voiceInCall && autoOff.current) {
+      autoOff.current = false;
+      if (!shareVoice) setShareVoice?.(true);
+    }
+  }, [voiceInCall, shareVoice, setShareVoice]);
   const watching = viewerCount === 1 ? "1 watching" : `${viewerCount} watching`;
   return (
     <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-ink px-6 text-center">
@@ -307,6 +324,12 @@ function NativePresenterView({ api, media }: { api: LiveStageApi; media: LiveMed
             {nativeAudio?.sound ? " and hears its sound" : ""}. Come back here or use the
             notification to stop.
           </p>
+          {nativeAudio?.voice && !voiceInCall && (
+            <p className="max-w-xs text-xs text-smoke">
+              On speaker, your mic also picks up the phone&apos;s sound — use
+              headphones to stop any echo.
+            </p>
+          )}
           {nativeAudio && !nativeAudio.sound && (
             <p className="max-w-xs text-xs text-smoke">
               No sound: allow PlayCircle the microphone in Android settings to share it.
@@ -318,15 +341,20 @@ function NativePresenterView({ api, media }: { api: LiveStageApi; media: LiveMed
                 type="button"
                 role="switch"
                 aria-checked={nativeAudio.voice}
+                disabled={voiceInCall}
                 onClick={() => nativeAudio.setVoice(!nativeAudio.voice)}
-                className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                className={`flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-60 ${
                   nativeAudio.voice
                     ? "border-signal bg-signal/15 text-bone"
                     : "border-edge text-smoke hover:bg-bone/5"
                 }`}
               >
                 <Icon name="mic" size={13} />
-                {nativeAudio.voice ? "My voice: on" : "My voice: off"}
+                {voiceInCall
+                  ? "My voice: via the call"
+                  : nativeAudio.voice
+                    ? "My voice: on"
+                    : "My voice: off"}
               </button>
             )}
             <QualityMenu label="Max quality" value={cap} onChange={setCap} />

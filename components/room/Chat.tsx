@@ -32,7 +32,7 @@ type ChatProps = {
   selfBrowser: string | null;
   canChat: boolean;
   isAdmin: boolean;
-  /** Seconds into the current YouTube video, or null (live share / nothing playing). */
+  /** Seconds into the current video, or null (live share / nothing playing). */
   getVideoTime: () => number | null;
   /** Jump the shared video to t; the parent checks permission and toasts if not allowed. */
   onSeek: (t: number) => void;

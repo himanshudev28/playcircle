@@ -4,7 +4,7 @@
 // item that won a binding "what's next" poll (server/polls.js) is flagged
 // `next` and jumps ahead of both.
 
-const { str, oneOf } = require("./limits");
+const { oneOf } = require("./limits");
 
 const MAX_ITEMS = 50;
 const MAX_PENDING_PER_PERSON = 5;
@@ -99,21 +99,35 @@ module.exports = function registerQueue(ctx) {
     connection(socket, on) {
       const allow = socket.data.allow;
 
-      on("queue:add", (p, reply) => {
+      // { media } is checked on the spot; { input } (a pasted link) is
+      // resolved first, which can take a few seconds.
+      on("queue:add", async (p, reply) => {
         const room = ctx.roomOf(socket);
         if (!room) return reply({ ok: false });
-        const perms = ctx.effectivePerms(room, socket.id);
         // Someone the host silenced can't flood the queue instead.
-        if (!perms.chat) {
+        if (!ctx.effectivePerms(room, socket.id).chat) {
           return reply({ ok: false, error: "The host turned off your suggestions" });
         }
         if (!allow("queue:add", 6, 20_000)) {
           return reply({ ok: false, error: "Slow down a little" });
         }
-        const m = media.fromClient(p.media) || media.parseInput(str(p.input, 2000));
-        if (!m) {
-          return reply({ ok: false, error: "That doesn't look like a YouTube link" });
+        const ropts = { allowPrivate: !!ctx.opts.resolveOptions?.allowPrivate };
+        const why = media.refusal(p.media, ropts);
+        if (why) return reply({ ok: false, error: why });
+        let m = media.fromClient(p.media, ropts);
+        if (m) {
+          ctx.withKnownInfo(room, m);
+        } else {
+          const out = await ctx.resolveInput(socket, p.input);
+          // Meanwhile they may have left or been silenced.
+          if (ctx.roomOf(socket) !== room) return reply({ ok: false });
+          if (!ctx.effectivePerms(room, socket.id).chat) {
+            return reply({ ok: false, error: "The host turned off your suggestions" });
+          }
+          if (out.error) return reply({ ok: false, error: out.error });
+          m = out.media;
         }
+        const perms = ctx.effectivePerms(room, socket.id);
 
         const user = room.users.get(socket.id);
         const k = media.key(m);
@@ -161,9 +175,11 @@ module.exports = function registerQueue(ctx) {
         if (item.status === "pending") {
           ctx.noticeAdmins(room, `${user.name} suggested a video — check Up next`);
         }
-        media.enrich(m).then(() => {
-          if (findItem(room, item.id)) broadcastQueue(room);
-        });
+        if (media.needsEnrich(m)) {
+          media.enrich(m).then(() => {
+            if (findItem(room, item.id)) broadcastQueue(room);
+          });
+        }
         // Nothing on stage: a ready suggestion just starts.
         if (!room.media && item.status === "ready") ctx.playNext(room, socket.id);
         else broadcastQueue(room);

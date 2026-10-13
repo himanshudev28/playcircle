@@ -8,6 +8,7 @@ import {
   useState,
   useSyncExternalStore,
   type ReactNode,
+  type RefObject,
 } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -28,13 +29,13 @@ import {
   type PollClosed,
   type QueueReply,
   type QueueState,
+  type Reply,
   type RoomSettings,
   type RoomSnapshot,
   type RoomUser,
-  type YoutubeMedia,
+  type VideoMedia,
 } from "@/lib/socket";
 import { prefetchIce } from "@/lib/ice";
-import { parseYouTubeId } from "@/lib/youtube";
 import { useCall } from "./useCall";
 import { Avatar, CallPanel } from "./CallPanel";
 import { Chat } from "./Chat";
@@ -48,8 +49,13 @@ import { useClockOffset } from "./useClockOffset";
 import { useLiveStage } from "./useLiveStage";
 import { useSyncedPlayer } from "./useSyncedPlayer";
 import { SyncStatus, syncStateOf } from "./SyncStatus";
+import { SourceBadge, mediaTitle, mediaUrl } from "./mediaInfo";
 
 const ACK_TIMEOUT = 8000;
+/** A pasted link is resolved on the server (it may fetch the page), which
+    can take up to ~12 s — leave headroom so a slow resolve isn't reported
+    as unreachable while the server still loads / queues it. */
+const LOAD_TIMEOUT = 20000;
 
 // Leaving is deferred a tick so React's dev-mode double mount (unmount +
 // immediate remount) doesn't bounce you out of the room and back in.
@@ -81,7 +87,8 @@ export function RoomClient({ code }: { code: string }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [queue, setQueue] = useState<QueueState>(EMPTY_QUEUE);
   const [urlInput, setUrlInput] = useState("");
-  const [adding, setAdding] = useState(false);
+  // A pasted link being resolved by the server: which button sent it.
+  const [finding, setFinding] = useState<"play" | "queue" | null>(null);
   const [copied, setCopied] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [selfId, setSelfId] = useState<string | null>(null);
@@ -134,7 +141,10 @@ export function RoomClient({ code }: { code: string }) {
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = setTimeout(() => setToast(null), 2200);
+    // Long messages (why a link can't play, what to do instead) stay up
+    // long enough to read.
+    const ms = Math.min(7000, Math.max(2200, msg.length * 60));
+    toastTimerRef.current = setTimeout(() => setToast(null), ms);
   }, []);
 
   const call = useCall(showToast);
@@ -164,6 +174,7 @@ export function RoomClient({ code }: { code: string }) {
     destroy: destroyPlayer,
     sync,
     duration,
+    error: playerError,
     getVideoTime,
     seekTo,
   } = useSyncedPlayer({
@@ -175,6 +186,12 @@ export function RoomClient({ code }: { code: string }) {
   useEffect(() => {
     mediaRef.current = media;
   }, [media]);
+
+  // The player box (stage, reactions, error overlay) is what goes full
+  // screen — not the embed's iframe — so reactions and the floating call
+  // bubbles (portalled into the fullscreen element) stay visible.
+  const playerBoxRef = useRef<HTMLDivElement>(null);
+  const boxFull = useBoxFullscreen(playerBoxRef);
 
   // Relay credentials ready before anyone calls or shares.
   useEffect(() => {
@@ -257,7 +274,8 @@ export function RoomClient({ code }: { code: string }) {
     const onChatPinned = (m: ChatMessage | null) => setPinned(m);
     const onQueue = (q: QueueState) => setQueue(q);
 
-    // Floating reactions land on the video's timeline (YouTube only).
+    // Floating reactions land on the video's timeline (videos only — a live
+    // share has none).
     const onReaction = (r: LiveReaction) => {
       const t = r.t;
       if (t === null || !isTimed(mediaRef.current)) return;
@@ -367,38 +385,53 @@ export function RoomClient({ code }: { code: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, code]);
 
-  // Play now: straight onto the stage. The server echoes the load back to
-  // everyone (us included), and that's what actually swaps the video.
+  // Clear the box after a link landed — unless they've typed something new
+  // while the server was resolving it.
+  function clearInput(sent: string) {
+    setUrlInput((v) => (v.trim() === sent ? "" : v));
+  }
+
+  // Play now: straight onto the stage. Any link goes to the server, which
+  // works out what video it is (YouTube, Vimeo, a file, a page with a video…)
+  // and echoes the load back to everyone (us included) — that's what
+  // actually swaps the video. The ack only says whether it worked.
   function playNow() {
     if (!perms.video) {
       noControlToast();
       return;
     }
-    const id = parseYouTubeId(urlInput);
-    if (!id) {
-      showToast("That doesn't look like a YouTube link");
-      return;
-    }
-    setUrlInput("");
-    const next: YoutubeMedia = { kind: "youtube", id };
-    getSocket().emit("player:action", { type: "load", media: next });
+    const input = urlInput.trim();
+    if (!input || finding) return;
+    setFinding("play");
+    getSocket()
+      .timeout(LOAD_TIMEOUT)
+      .emit(
+        "player:action",
+        { type: "load", input },
+        (err: Error | null, res?: Reply) => {
+          setFinding(null);
+          if (err || !res) return showToast("Couldn't reach the room — try again");
+          if (!res.ok) return showToast(res.error || "Couldn't play that link");
+          clearInput(input);
+        }
+      );
   }
 
   function addToQueue() {
     const input = urlInput.trim();
-    if (!input || adding) return;
+    if (!input || finding) return;
     if (!perms.chat) {
       showToast("The host turned off your suggestions");
       return;
     }
-    setAdding(true);
+    setFinding("queue");
     getSocket()
-      .timeout(ACK_TIMEOUT)
+      .timeout(LOAD_TIMEOUT)
       .emit("queue:add", { input }, (err: Error | null, res?: QueueReply) => {
-        setAdding(false);
+        setFinding(null);
         if (err || !res) return showToast("Couldn't reach the room — try again");
         if (!res.ok) return showToast(res.error || "Couldn't add that video");
-        setUrlInput("");
+        clearInput(input);
         if (res.status === "pending") {
           showToast(
             res.duplicate
@@ -465,8 +498,15 @@ export function RoomClient({ code }: { code: string }) {
           {/* Player column */}
           <div className="flex min-w-0 flex-col gap-4">
             <div>
-              <div className="relative aspect-video w-full overflow-hidden rounded-panel border border-edge bg-ink">
-                {/* YouTube owns everything inside this div; React never renders into it. */}
+              <div
+                ref={playerBoxRef}
+                className={`group/box relative w-full overflow-hidden bg-ink ${
+                  boxFull.full
+                    ? "grid h-screen w-screen place-items-center"
+                    : "aspect-video rounded-panel border border-edge"
+                }`}
+              >
+                {/* The player owns everything inside this div; React never renders into it. */}
                 <div
                   ref={mountRef}
                   className={`absolute inset-0 ${timed ? "" : "hidden"}`}
@@ -479,7 +519,10 @@ export function RoomClient({ code }: { code: string }) {
                   />
                 )}
                 {!media && <EmptyStage canControl={perms.video} />}
-                {timed && needsGesture && (
+                {timed && playerError && (
+                  <PlayerError media={media} message={playerError} />
+                )}
+                {timed && needsGesture && !playerError && (
                   <button
                     onClick={startPlayback}
                     className="absolute inset-0 z-10 grid place-items-center bg-ink/80 backdrop-blur-sm transition"
@@ -500,6 +543,14 @@ export function RoomClient({ code }: { code: string }) {
                   </button>
                 )}
                 <ReactionOverlay />
+                {timed && boxFull.full && (
+                  // In full screen the title row is gone: a way back out,
+                  // shown on hover (always on touch screens) so it doesn't
+                  // sit over the embed's own controls the whole time.
+                  <div className="absolute right-3 top-3 z-20 opacity-0 transition-opacity focus-within:opacity-100 group-hover/box:opacity-100 [@media(hover:none)]:opacity-100">
+                    <PlayerFullscreenButton full onToggle={boxFull.toggle} />
+                  </div>
+                )}
               </div>
 
               {timed && (
@@ -513,7 +564,15 @@ export function RoomClient({ code }: { code: string }) {
 
               {(media || !connected) && (
                 <NowPlayingRow media={media}>
-                  <SyncStatus state={syncState} drift={sync.drift} />
+                  <div className="flex shrink-0 items-center gap-2">
+                    <SyncStatus state={syncState} drift={sync.drift} />
+                    {timed && boxFull.supported && (
+                      <PlayerFullscreenButton
+                        full={boxFull.full}
+                        onToggle={boxFull.toggle}
+                      />
+                    )}
+                  </div>
                 </NowPlayingRow>
               )}
 
@@ -542,16 +601,18 @@ export function RoomClient({ code }: { code: string }) {
                 disabled={!perms.video && !perms.chat}
                 placeholder={
                   perms.video || perms.chat
-                    ? "Paste a YouTube link…"
+                    ? "Paste a link — YouTube, Vimeo, Twitch, a video file, or any page with a video…"
                     : "The host turned off your suggestions"
                 }
-                aria-label="YouTube link"
+                aria-label="Video link"
+                aria-busy={!!finding}
+                maxLength={2000}
                 className="w-full min-w-0 rounded-card border border-edge bg-ink px-4 py-3 text-sm outline-none transition focus:border-signal/60 disabled:cursor-not-allowed disabled:opacity-60"
               />
               <div className="flex flex-wrap gap-2 sm:flex-nowrap">
                 <button
                   onClick={playNow}
-                  disabled={!perms.video || !hasLink}
+                  disabled={!perms.video || !hasLink || !!finding}
                   title={
                     perms.video
                       ? "Start this video for everyone now"
@@ -559,15 +620,15 @@ export function RoomClient({ code }: { code: string }) {
                   }
                   className="flex-1 whitespace-nowrap rounded-card bg-signal px-4 py-3 text-sm font-semibold transition hover:bg-signal-hot active:scale-95 disabled:pointer-events-none disabled:opacity-40 sm:flex-none"
                 >
-                  Play now
+                  {finding === "play" ? "Finding the video…" : "Play now"}
                 </button>
                 <button
                   onClick={addToQueue}
-                  disabled={!perms.chat || !hasLink || adding}
+                  disabled={!perms.chat || !hasLink || !!finding}
                   title="Add it to Up next"
                   className="flex-1 whitespace-nowrap rounded-card border border-edge bg-bone/5 px-4 py-3 text-sm font-medium transition hover:bg-bone/10 active:scale-95 disabled:pointer-events-none disabled:opacity-40 sm:flex-none"
                 >
-                  Add to queue
+                  {finding === "queue" ? "Finding the video…" : "Add to queue"}
                 </button>
                 {perms.video && readyCount > 0 && (
                   <button
@@ -652,6 +713,74 @@ export function RoomClient({ code }: { code: string }) {
 }
 
 // Slim row under the player: what's on, and how we're doing against the room.
+/* ------------------------------------------------- player full screen */
+
+// Element fullscreen exists (iOS Safari only has the <video>'s own, which an
+// embed handles itself). Read on the client only, so SSR renders no button.
+const fullscreenSupported = () =>
+  typeof document !== "undefined" && !!document.fullscreenEnabled;
+
+function useBoxFullscreen(boxRef: RefObject<HTMLDivElement | null>) {
+  const supported = useSyncExternalStore(noSubscribe, fullscreenSupported, () => false);
+  const [full, setFull] = useState(false);
+
+  useEffect(() => {
+    const onChange = () =>
+      setFull(!!boxRef.current && document.fullscreenElement === boxRef.current);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, [boxRef]);
+
+  const toggle = useCallback(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else if (typeof box.requestFullscreen === "function") {
+      box.requestFullscreen().catch(() => {});
+    }
+  }, [boxRef]);
+
+  return { supported, full, toggle };
+}
+
+function PlayerFullscreenButton({
+  full,
+  onToggle,
+}: {
+  full: boolean;
+  onToggle: () => void;
+}) {
+  const label = full ? "Exit full screen" : "Full screen";
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      title={label}
+      aria-label={label}
+      className="grid h-8 w-8 place-items-center rounded-full border border-edge bg-ink/70 text-bone backdrop-blur-sm transition hover:bg-film-2"
+    >
+      <svg
+        width={15}
+        height={15}
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        {full ? (
+          <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" />
+        ) : (
+          <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+        )}
+      </svg>
+    </button>
+  );
+}
+
 function NowPlayingRow({
   media,
   children,
@@ -669,21 +798,64 @@ function NowPlayingRow({
             </p>
             <p className="truncate text-xs text-smoke">Live share by {media.by}</p>
           </>
-        ) : media?.title ? (
+        ) : media?.kind === "youtube" && !media.title ? (
+          // No title (yet, or the lookup failed): the id still says what it is.
+          <p className="truncate font-mono text-xs text-dim">youtu.be/{media.id}</p>
+        ) : media ? (
           <>
-            <p className="truncate text-sm font-semibold text-bone">
-              {media.title}
+            <p className="flex min-w-0 items-center gap-2">
+              <span className="truncate text-sm font-semibold text-bone">
+                {mediaTitle(media)}
+              </span>
+              <SourceBadge media={media} />
             </p>
             {media.author && (
               <p className="truncate text-xs text-smoke">{media.author}</p>
             )}
           </>
-        ) : media ? (
-          // No title (yet, or the lookup failed): the id still says what it is.
-          <p className="truncate font-mono text-xs text-dim">youtu.be/{media.id}</p>
         ) : null}
       </div>
       {children}
+    </div>
+  );
+}
+
+// The player couldn't play this video (embedding blocked, removed, a format
+// the browser can't decode…). Point at the original, and at sharing it live.
+function PlayerError({
+  media,
+  message,
+}: {
+  media: VideoMedia;
+  message: string;
+}) {
+  return (
+    <div
+      role="alert"
+      className="absolute inset-0 z-10 grid place-items-center overflow-y-auto bg-ink/90 px-6 py-4 text-center backdrop-blur-sm"
+    >
+      <div className="max-w-sm">
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-full border border-edge bg-film text-dim">
+          <Icon name="film" size={24} />
+        </div>
+        <h2 className="mt-4 font-display text-lg font-bold text-bone">
+          This video can&apos;t play here
+        </h2>
+        <p className="mt-2 text-sm text-smoke">{message}</p>
+        <a
+          href={mediaUrl(media)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-5 inline-flex items-center gap-2 rounded-card border border-edge bg-bone/5 px-4 py-2.5 text-sm font-semibold text-bone transition hover:bg-bone/10 active:scale-95"
+        >
+          Open original
+          <Icon name="arrowRight" size={15} />
+        </a>
+        <p className="mt-4 text-xs text-dim">
+          Or share it live: open it in another tab, then use Share → Browser
+          tab so everyone watches with you.
+        </p>
+      </div>
     </div>
   );
 }
@@ -770,7 +942,7 @@ function EmptyStage({ canControl }: { canControl: boolean }) {
         </h2>
         <p className="mt-2 text-sm text-smoke">
           {canControl
-            ? "Paste a YouTube link below and it starts for everyone in the room."
+            ? "Paste a link below — YouTube, Vimeo, Twitch, a video file or a page with a video — and it starts for everyone in the room."
             : "The host picks what plays. Sit tight — it starts for you automatically."}
         </p>
       </div>

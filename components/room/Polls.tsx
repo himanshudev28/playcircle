@@ -19,6 +19,7 @@ import {
   type QueueState,
   type Reply,
 } from "@/lib/socket";
+import { MediaThumb, SourceBadge, mediaTitle } from "./mediaInfo";
 
 /* Room polls.
    - PollCard: the running poll (or the last result for a few seconds) at the
@@ -797,8 +798,6 @@ function ItemChoice({
   disabled: boolean;
   onToggle: () => void;
 }) {
-  const src =
-    item.media.thumb || `https://i.ytimg.com/vi/${item.media.id}/mqdefault.jpg`;
   return (
     <li>
       <label
@@ -815,25 +814,14 @@ function ItemChoice({
           onChange={onToggle}
           className="h-4 w-4 shrink-0 accent-signal"
         />
-        <span
-          className="relative block aspect-video shrink-0 overflow-hidden rounded-lg bg-ink"
-          style={{ width: 72 }}
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={src}
-            alt=""
-            loading="lazy"
-            decoding="async"
-            className="h-full w-full object-cover"
-          />
-        </span>
+        <MediaThumb media={item.media} width={72} />
         <span className="min-w-0 flex-1">
           <span className="line-clamp-2 text-sm leading-snug">
-            {item.media.title || "Untitled video"}
+            {mediaTitle(item.media)}
           </span>
-          <span className="mt-0.5 block truncate text-xs text-smoke">
-            added by {item.by.name}
+          <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-smoke">
+            <SourceBadge media={item.media} />
+            <span className="truncate">added by {item.by.name}</span>
           </span>
         </span>
       </label>

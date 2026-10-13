@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { getSocket } from "@/lib/socket";
 import { iceServers } from "@/lib/ice";
 
@@ -21,12 +21,25 @@ const AUDIO: MediaTrackConstraints = {
   noiseSuppression: true,
   autoGainControl: true,
 };
-const VIDEO: MediaTrackConstraints = {
-  width: { ideal: 640 },
-  height: { ideal: 360 },
-  frameRate: { ideal: 24 },
-  facingMode: "user",
-};
+export type Facing = "user" | "environment";
+
+function videoFor(facing: Facing): MediaTrackConstraints {
+  return {
+    width: { ideal: 640 },
+    height: { ideal: 360 },
+    frameRate: { ideal: 24 },
+    facingMode: facing,
+  };
+}
+
+async function cameraCount(): Promise<number> {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.filter((d) => d.kind === "videoinput").length;
+  } catch {
+    return 0;
+  }
+}
 
 // A connection that fails (usually NAT trouble) is rebuilt this many times.
 const MAX_RETRIES = 2;
@@ -45,6 +58,29 @@ type JoinReply = {
 
 export type CallApi = ReturnType<typeof useCall>;
 
+/* "Is my voice already going out through the call?" — read by the live
+   stage, so a share never sends a second copy of your voice (heard as an
+   echo by everyone in the call). One call per page, so a module store. */
+let voiceInCall = false;
+const voiceListeners = new Set<() => void>();
+function setVoiceInCall(on: boolean) {
+  if (on === voiceInCall) return;
+  voiceInCall = on;
+  voiceListeners.forEach((l) => l());
+}
+export function useVoiceInCall(): boolean {
+  return useSyncExternalStore(
+    (l) => {
+      voiceListeners.add(l);
+      return () => {
+        voiceListeners.delete(l);
+      };
+    },
+    () => voiceInCall,
+    () => false
+  );
+}
+
 function stopAll(stream: MediaStream | null | undefined) {
   stream?.getTracks().forEach((t) => t.stop());
 }
@@ -54,6 +90,10 @@ export function useCall(onNotice: (msg: string) => void) {
   const [joining, setJoining] = useState(false);
   const [mic, setMic] = useState(false);
   const [cam, setCam] = useState(false);
+  /** Which way your camera faces; the front one is mirrored in your tile. */
+  const [facing, setFacing] = useState<Facing>("user");
+  /** More than one camera, so flipping does something. */
+  const [canFlip, setCanFlip] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<
     Record<string, MediaStream>
@@ -69,6 +109,7 @@ export function useCall(onNotice: (msg: string) => void) {
   const micTrack = useRef<MediaStreamTrack | null>(null);
   const camTrack = useRef<MediaStreamTrack | null>(null);
   const busy = useRef({ audio: false, video: false });
+  const facingRef = useRef<Facing>("user");
   const pcs = useRef(new Map<string, RTCPeerConnection>());
   const peerSession = useRef(new Map<string, string>());
   const initiated = useRef(new Set<string>());
@@ -90,6 +131,11 @@ export function useCall(onNotice: (msg: string) => void) {
       (t): t is MediaStreamTrack => !!t
     );
     setLocalStream(tracks.length ? new MediaStream(tracks) : null);
+  }, []);
+
+  // Device labels and counts are only reliable once the camera is allowed.
+  const checkFlip = useCallback(() => {
+    cameraCount().then((n) => setCanFlip(n > 1));
   }, []);
 
   const publish = useCallback((next: { mic: boolean; cam: boolean }) => {
@@ -305,7 +351,7 @@ export function useCall(onNotice: (msg: string) => void) {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: AUDIO,
-          video: withVideo ? VIDEO : false,
+          video: withVideo ? videoFor(facingRef.current) : false,
         });
       } catch {
         // Camera busy/denied shouldn't stop you talking; no mic at all
@@ -337,6 +383,7 @@ export function useCall(onNotice: (msg: string) => void) {
       setInCall(true);
       setJoining(false);
       refreshLocal();
+      if (camTrack.current) checkFlip();
 
       getSocket().emit("call:join", stateRef.current, (res: JoinReply) => {
         if (gen !== genRef.current) return;
@@ -354,7 +401,7 @@ export function useCall(onNotice: (msg: string) => void) {
         }
       });
     },
-    [callPeer, refreshLocal, removePeer, supported, teardown]
+    [callPeer, checkFlip, refreshLocal, removePeer, supported, teardown]
   );
 
   const leave = useCallback(() => {
@@ -405,7 +452,9 @@ export function useCall(onNotice: (msg: string) => void) {
     const gen = genRef.current;
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO });
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: videoFor(facingRef.current),
+      });
     } catch {
       noticeRef.current("Camera blocked or in use by another app");
       return;
@@ -421,6 +470,79 @@ export function useCall(onNotice: (msg: string) => void) {
     replaceAll("video", camTrack.current);
     refreshLocal();
     publish({ ...stateRef.current, cam: true });
+    checkFlip();
+  }, [checkFlip, publish, refreshLocal, replaceAll]);
+
+  /* Front ↔ back. Phones can't hold two cameras open, so the current one is
+     let go first, and its replacement goes out with replaceTrack — nobody
+     reconnects. facingMode is only a hint: a camera that doesn't report one
+     (USB webcams, some multi-lens phones) comes back unchanged, and then
+     we step to another camera by id. */
+  const flipCam = useCallback(async () => {
+    const old = camTrack.current;
+    if (!inCallRef.current || !old || busy.current.video) return;
+    busy.current.video = true;
+    const gen = genRef.current;
+    const was = facingRef.current;
+    const next: Facing = was === "user" ? "environment" : "user";
+    const oldId = old.getSettings().deviceId;
+    old.stop();
+
+    const open = async (video: MediaTrackConstraints) => {
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({ video });
+        return s.getVideoTracks()[0] ?? null;
+      } catch {
+        return null;
+      }
+    };
+    let track = await open(videoFor(next));
+    if (track && oldId && track.getSettings().deviceId === oldId) {
+      track.stop();
+      track = null;
+      const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+      const other = devices.find((d) => d.kind === "videoinput" && d.deviceId !== oldId);
+      if (other?.deviceId) {
+        track = await open({
+          ...videoFor(next),
+          facingMode: undefined,
+          deviceId: { exact: other.deviceId },
+        });
+      }
+    }
+    const flipped = !!track;
+    if (!track) {
+      track = await open(
+        oldId ? { ...videoFor(was), deviceId: { exact: oldId } } : videoFor(was)
+      );
+    }
+    busy.current.video = false;
+
+    if (gen !== genRef.current || !inCallRef.current || camTrack.current !== old) {
+      track?.stop();
+      return;
+    }
+    if (!track) {
+      camTrack.current = null;
+      replaceAll("video", null);
+      refreshLocal();
+      publish({ ...stateRef.current, cam: false });
+      noticeRef.current("Lost the camera — turn it back on to retry");
+      return;
+    }
+    if (!flipped) noticeRef.current("Couldn't switch cameras");
+    const reported = track.getSettings().facingMode;
+    const now: Facing =
+      reported === "user" || reported === "environment"
+        ? reported
+        : flipped
+          ? next
+          : was;
+    facingRef.current = now;
+    setFacing(now);
+    camTrack.current = track;
+    replaceAll("video", track);
+    refreshLocal();
   }, [publish, refreshLocal, replaceAll]);
 
   // ---- Socket wiring ----
@@ -459,6 +581,11 @@ export function useCall(onNotice: (msg: string) => void) {
     };
   }, [onSignal, publish, removePeer, teardown]);
 
+  useEffect(() => {
+    setVoiceInCall(inCall && mic);
+    return () => setVoiceInCall(false);
+  }, [inCall, mic]);
+
   // Leaving the page hangs up (and voids any getUserMedia still pending).
   useEffect(() => {
     return () => {
@@ -473,6 +600,8 @@ export function useCall(onNotice: (msg: string) => void) {
     joining,
     mic,
     cam,
+    facing,
+    canFlip,
     localStream,
     remoteStreams,
     join,
@@ -480,6 +609,7 @@ export function useCall(onNotice: (msg: string) => void) {
     teardown,
     toggleMic,
     toggleCam,
+    flipCam,
   };
 }
 

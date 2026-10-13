@@ -4,9 +4,9 @@
 
 # PlayCircle
 
-### Watch YouTube together, perfectly in sync.
+### Watch videos together, perfectly in sync.
 
-Create a room, paste a link, and everyone sees the same frame at the same time,<br/>
+Create a room, paste a link (YouTube, Vimeo, Twitch, a video file, or almost any page with a video), and everyone sees the same frame at the same time,<br/>
 with live chat, emoji reactions, polls, video calls, screen sharing, a shared watch queue, and host controls. Everything runs in the browser, with no downloads and no accounts.
 
 <br/>
@@ -18,7 +18,7 @@ with live chat, emoji reactions, polls, video calls, screen sharing, a shared wa
 ![Socket.IO](https://img.shields.io/badge/Socket.IO-060505?style=for-the-badge&logo=socketdotio&logoColor=f5f1ea)
 ![WebRTC](https://img.shields.io/badge/WebRTC-060505?style=for-the-badge&logo=webrtc&logoColor=f4433c)
 
-[Features](#-features) · [Quick start](#-quick-start) · [Architecture](#-architecture) · [Socket events](#-socket-events) · [Deploy notes](#-deploy-notes)
+[Features](#-features) · [Paste any link](#-paste-any-link) · [Quick start](#-quick-start) · [Architecture](#-architecture) · [Socket events](#-socket-events) · [Deploy notes](#-deploy-notes)
 
 </div>
 
@@ -31,7 +31,7 @@ with live chat, emoji reactions, polls, video calls, screen sharing, a shared wa
 <td width="50%" valign="top">
 
 ### 🎬 Synced playback
-Play, pause, and seek reach every viewer in real time. The server owns the playhead, so a late joiner **lands on the exact current frame** instead of the start. Every 3 seconds it broadcasts where the room really is, and any player that has drifted more than 1.5s quietly corrects itself.
+Paste **almost any link** — YouTube, Vimeo, Twitch, a video file or HLS stream, or a page that shares its video — and the server works out what to play (see [Paste any link](#-paste-any-link)). Play, pause, and seek reach every viewer in real time. The server owns the playhead, so a late joiner **lands on the exact current frame** instead of the start. Every 3 seconds it broadcasts where the room really is, and any player that has drifted more than 1.5s quietly corrects itself.
 
 </td>
 <td width="50%" valign="top">
@@ -45,7 +45,7 @@ Type a timecode like `12:34` and it becomes a **link that jumps the video there*
 <td valign="top">
 
 ### 😂 Live reactions & moments
-Tap an emoji under the player (😂 ❤️ 🔥 😮 👏 😭 💀 🎉) and it **floats up over the video** for everyone. On a YouTube video each reaction is stamped with the playhead, building a **Room reactions** strip: a bar chart of where the room reacted, with up to three peaks marked. **Click a bar to jump** there. The strip starts fresh with each video and is saved with the room.
+Tap an emoji under the player (😂 ❤️ 🔥 😮 👏 😭 💀 🎉) and it **floats up over the video** for everyone. On a synced video (anything but a live share) each reaction is stamped with the playhead, building a **Room reactions** strip: a bar chart of where the room reacted, with up to three peaks marked. **Click a bar to jump** there. The strip starts fresh with each video and is saved with the room.
 
 </td>
 <td valign="top">
@@ -87,13 +87,13 @@ Whoever creates a room keeps **first right**: whenever they're in it they hold t
 <td valign="top">
 
 ### 📋 Shared watch queue
-The **Up next** tab lets anyone suggest a video. Viewers' suggestions wait for **host approval**, which the creator can turn off. Everyone **votes**, and the list is ordered **by votes or by hand**. With video control you can **play now** or **skip**; the host can also **remove**, **reorder**, and **clear**. When a video ends, the next one **plays automatically**. **Recently played** lets you queue a video again. Titles and thumbnails come from YouTube's oEmbed, so no API key is needed. The trade-off is that a video's length is only known once it has played.
+The **Up next** tab lets anyone suggest a video by pasting any link the player accepts. Viewers' suggestions wait for **host approval**, which the creator can turn off. Everyone **votes**, and the list is ordered **by votes or by hand**. With video control you can **play now** or **skip**; the host can also **remove**, **reorder**, and **clear**. When a video ends, the next one **plays automatically**. **Recently played** lets you queue a video again. Titles and thumbnails come from the link itself (YouTube's and Vimeo's oEmbed, a provider's public API, or the page's own preview tags), so no API key is needed. The trade-off is that a video's length is usually only known once it has played.
 
 </td>
 <td valign="top">
 
 ### 🛟 Reliability
-A **sync pill** shows where you stand: *In sync*, *Catching up*, *Buffering*, *Reconnecting*, or *Live*. After a dropped connection the room **rejoins and resyncs on its own**, and a background tab resyncs when you come back to it. Live streams are never seeked. Rooms are **saved to disk and come back (paused) after a restart**. Every payload is validated, chatty events are rate limited, room codes are checked, and the server caps out at 2,000 rooms and 50 people per room.
+A **sync pill** shows where you stand: *In sync*, *Catching up*, *Buffering*, *Reconnecting*, or *Live*. After a dropped connection the room **rejoins and resyncs on its own**, and a background tab resyncs when you come back to it. Live streams are never seeked. A link that can't play here gets a **clear reason** instead of a broken player. Rooms are **saved to disk and come back (paused) after a restart**. Every payload is validated, chatty events are rate limited, room codes are checked, and the server caps out at 2,000 rooms and 50 people per room.
 
 </td>
 </tr>
@@ -113,7 +113,40 @@ At `/vent`, anyone can post a thought anonymously. Each post gets a random alias
 </tr>
 </table>
 
-**Also included:** an animated landing page (intro sequence, rotating hero, counting stats, scroll reveals, FAQ accordions), generated Open Graph and Twitter images, `sitemap.xml`, `robots.txt`, JSON-LD, a one-click invite link, **Resync**, and a "tap to join" overlay for browsers that block autoplay.
+**Also included:** a **full-screen button** on the player box (floating call bubbles stay visible in full screen), an animated landing page (intro sequence, rotating hero, counting stats, scroll reveals, FAQ accordions), generated Open Graph and Twitter images, `sitemap.xml`, `robots.txt`, JSON-LD, a one-click invite link, **Resync**, and a "tap to join" overlay for browsers that block autoplay.
+
+---
+
+## 🔗 Paste any link
+
+The link box (and **Up next**) takes almost any link. The server works out the video, and everything that works on YouTube (sync, the queue, reactions and moments, polls) works on all of these.
+
+| You paste | What plays |
+|---|---|
+| A **YouTube** link or video ID | The YouTube player |
+| A **Vimeo** link | The Vimeo player |
+| A **Twitch** past broadcast | The Twitch player, synced like any video |
+| A **Twitch** channel | The channel live, shown as *Live* (never seeked) |
+| A direct video file (`.mp4`, `.m4v`, `.webm`, `.mov`, `.ogv`) | The browser's own `<video>` |
+| An **HLS** stream (`.m3u8`) | `<video>`, natively where the browser can, otherwise with [hls.js](https://github.com/video-dev/hls.js) |
+| A **Streamable**, **Internet Archive**, or **PeerTube** link | Found through the site's public API |
+| **Any other page** that shares its video openly | Found in the page: Open Graph `og:video`, the Twitter player stream, a schema.org `VideoObject`, `<video>` / `<source>` tags, oEmbed, or an embedded YouTube / Vimeo / Twitch player |
+
+When a link can't play here, the person who pasted it gets a clear reason instead of a broken player:
+
+| Link | Why it's refused |
+|---|---|
+| A page that doesn't share its video | Nothing to find without running the site's own code. Use **Share → Browser tab** instead |
+| Netflix, Prime Video, Disney+, Hotstar, Crunchyroll, Max, Hulu, Apple TV | Copy-protected; each person has to watch on their own account |
+| Twitch clips | Clips have no player API to sync; paste the video or channel link |
+| Dailymotion | Not supported yet: Dailymotion only allows embedding with a registered Player ID from a partner account (see below) |
+| Sites that block other players (e.g. TED's stream, some hosts without CORS) and dead links | The video can't be loaded outside the site, or isn't there |
+
+**Safety.** Resolving a link means the server fetches someone else's page, so [`server/safeFetch.js`](server/safeFetch.js) only goes to public internet addresses: private, loopback, link-local, CGNAT and cloud-metadata ranges are refused, the DNS answer that was checked is the one connected to (no rebinding), and every redirect is checked again. Each fetch has a 6 s deadline and a 2 MB cap, results are cached for 10 minutes, and resolving is rate limited per connection and per address. A file or HLS link on a private host is refused too, so viewers' browsers are never sent into their own networks. No page JavaScript is run and nothing protected is bypassed: if a site doesn't hand out its video, PlayCircle says so.
+
+**Dailymotion.** Dailymotion links are recognised, but Dailymotion's player now refuses to play inside other sites unless they register a Player ID with a Dailymotion partner account, so the player shows Dailymotion's own "Forbidden" screen. It isn't supported yet — open it in a tab and use Share → Browser tab.
+
+**Twitch** only plays on pages served over **https** (or `localhost`). Plain `http://<LAN-IP>` gets a message instead.
 
 ---
 
@@ -141,7 +174,7 @@ npm run build && npm start
 npm test           # node --test integration tests in test/realtime.test.mjs
 ```
 
-The tests mount the realtime server on a bare HTTP server and drive it with real `socket.io-client` connections. They run offline: `OFFLINE_META=1` skips the oEmbed title lookups.
+The tests mount the realtime server on a bare HTTP server and drive it with real `socket.io-client` connections. They run offline: `OFFLINE_META=1` skips the oEmbed title lookups, and the link-resolution tests serve their pages from `127.0.0.1` fixtures.
 
 ### Routes
 
@@ -160,15 +193,16 @@ The tests mount the realtime server on a bare HTTP server and drive it with real
 ```mermaid
 flowchart LR
     subgraph Browser A
-        YA[YouTube IFrame] <--> RA[RoomClient]
+        YA[StagePlayer<br/>YouTube · video · Vimeo · Twitch] <--> RA[RoomClient]
     end
     subgraph Browser B
-        YB[YouTube IFrame] <--> RB[RoomClient]
+        YB[StagePlayer<br/>YouTube · video · Vimeo · Twitch] <--> RB[RoomClient]
     end
     RA <-- Socket.IO --> S[(server.js + server/<br/>Next.js + Socket.IO<br/>rooms in memory)]
     RB <-- Socket.IO --> S
     S -. snapshot every 5s .-> D[(.data/rooms.json)]
     RA <-. WebRTC calls + shares .-> RB
+    S -- resolve pasted links --> W[(Public web pages<br/>and provider APIs)]
 ```
 
 **Server**
@@ -182,15 +216,18 @@ flowchart LR
 | [`server/polls.js`](server/polls.js) | One poll at a time: quick polls, "What's next?" (binding winner plays next), and skip/replay votes that settle early on a majority of the people present. Votes are per browser and only count while the voter is in the room. |
 | [`server/stage.js`](server/stage.js) | Live sharing: who may present, a fresh `streamId` per share, and relaying signaling between the presenter and each viewer (media never touches the server). The share ends when the presenter stops, leaves, or loses video control. |
 | [`server/limits.js`](server/limits.js) | Payload validation helpers, the `safe()` wrapper every handler goes through (a malformed payload can never throw inside the server), per-socket token-bucket rate limits, and the shared (server-wide) limiter used for passwords. |
-| [`server/media.js`](server/media.js) | Parses YouTube links and IDs into `{ kind: "youtube", id }`, and fills in titles, channel names, and thumbnails from YouTube's oEmbed (cached, no API key). |
+| [`server/media.js`](server/media.js) | The media kinds (`youtube`, `file`, `hls`, `vimeo`, `dailymotion`, `twitch`, and `live` for a share): strict validation of anything a client proposes, each kind's stable key, YouTube link parsing, and titles / channel names / thumbnails from YouTube's oEmbed (cached, no API key). Refuses file / HLS links on private hosts. |
+| [`server/resolve.js`](server/resolve.js) | "Paste any link": turns a pasted link into media or a human error. Known sites by URL shape (no fetch), copy-protected services, Streamable / Internet Archive / PeerTube through their public APIs, then any other page's openly shared video (Open Graph, Twitter player, JSON-LD `VideoObject`, `<video>`, oEmbed, embedded players). Never runs page JavaScript; results are cached for 10 minutes. |
+| [`server/safeFetch.js`](server/safeFetch.js) | SSRF-safe fetching for the resolver: public addresses only (IPv4 and IPv6), a pinned DNS lookup against rebinding, redirects followed by hand and re-checked, and a 6 s / 2 MB limit per fetch. |
 | [`server/persist.js`](server/persist.js) | Saves rooms as one JSON snapshot, written atomically and only when it changes. On startup, rooms are rebuilt field by field from that snapshot and come back paused. |
 
 **Client**
 
 | File | Responsibility |
 |---|---|
-| [`components/room/RoomClient.tsx`](components/room/RoomClient.tsx) | The room page. It wires up presence, chat, polls, reactions, settings, queue, and stage state, rejoins on every (re)connect, shows the password screen when a room asks for one, and lays out the Chat / Up next / People tabs. |
-| [`components/room/useSyncedPlayer.ts`](components/room/useSyncedPlayer.ts) | Owns the YouTube player. It projects the server's playhead to "now" using the clock offset, corrects drift over 1.5s, and resyncs when the tab becomes visible. Local play/pause/seek is reported only when it actually differs from the room, so a correction can never echo back as an action. It also reports a video's length and its end. |
+| [`components/room/RoomClient.tsx`](components/room/RoomClient.tsx) | The room page. It wires up presence, chat, polls, reactions, settings, queue, and stage state, rejoins on every (re)connect, shows the password screen when a room asks for one, and lays out the Chat / Up next / People tabs. It also sends pasted links to the server (showing the reason when one is refused) and holds the player box's full-screen button. |
+| [`components/room/useSyncedPlayer.ts`](components/room/useSyncedPlayer.ts) | Owns the stage player, whatever its kind, through the `StagePlayer` interface. It projects the server's playhead to "now" using the clock offset, corrects drift over 1.5s, and resyncs when the tab becomes visible. Local play/pause/seek is reported only when it actually differs from the room, so a correction can never echo back as an action. It also reports a video's length and its end, and detects live streams. |
+| [`components/room/players/`](components/room/players/) | One `StagePlayer` interface (play, pause, seek, time, duration, state, live) with an adapter per player: YouTube, HTML5 `<video>` for files and HLS (hls.js loaded on demand), Vimeo, Dailymotion, and Twitch. |
 | [`components/room/useClockOffset.ts`](components/room/useClockOffset.ts) | Estimates the server's clock NTP-style with a few `time:ping` round-trips, keeping the fastest. It re-measures on every reconnect and every 30s. |
 | [`components/room/SyncStatus.tsx`](components/room/SyncStatus.tsx) | The sync pill (In sync / Catching up / Buffering / Reconnecting / Live), debounced so brief blips don't flicker. |
 | [`components/room/Chat.tsx`](components/room/Chat.tsx) | The chat tab: clickable timestamps, the 📍 Moment button, replies, reactions, the pinned bar, announcements, search, delete, report, and the local block list. |
@@ -201,18 +238,18 @@ flowchart LR
 | [`components/room/QueuePanel.tsx`](components/room/QueuePanel.tsx) | The "Up next" tab. It only emits; the server enforces every permission. |
 | [`components/room/useCall.ts`](components/room/useCall.ts) | The WebRTC mesh. The newcomer to a call sends the offers. Each connection gets audio and video transceivers up front, so toggling the camera or mic is a `replaceTrack` with no renegotiation. |
 | [`components/room/PeoplePanel.tsx`](components/room/PeoplePanel.tsx) · [`CallPanel.tsx`](components/room/CallPanel.tsx) | Host controls (including Room controls and the password) and the call UI. |
-| [`lib/socket.ts`](lib/socket.ts) | Singleton `socket.io-client`, shared event types (YouTube and live media, chat, polls, reactions), and a per-browser `clientId` that host identity, removals, votes, and blocks are keyed on. |
+| [`lib/socket.ts`](lib/socket.ts) | Singleton `socket.io-client`, shared event types (every media kind and its key, chat, polls, reactions), and a per-browser `clientId` that host identity, removals, votes, and blocks are keyed on. |
 | [`lib/timestamps.ts`](lib/timestamps.ts) | Formats video times and finds `m:ss` / `h:mm:ss` timecodes in chat text. |
 | [`lib/youtube.ts`](lib/youtube.ts) | Parses a URL into a video ID and generates room codes. |
 | [`lib/site.ts`](lib/site.ts) | Single source of truth for SEO metadata, the sitemap, robots.txt, and OG images. |
 
 ### Live streams vs. VODs
 
-Regular videos get time-accurate catch-up: a late joiner seeks to the current position, and drift correction keeps everyone there. A **live stream** is never seeked, because seeking to an absolute time lands outside its DVR window. The client detects a live stream (YouTube's own flag, or a duration that is implausibly long or keeps growing) and stays at the live edge, where everyone is already in sync. The sync pill shows *Live*.
+Regular videos get time-accurate catch-up: a late joiner seeks to the current position, and drift correction keeps everyone there. A **live stream** is never seeked, because seeking to an absolute time lands outside its DVR window. The client detects a live stream (the player says so, as YouTube live, a Twitch channel, and an HLS stream with no end do; failing that, a duration that is implausibly long or keeps growing) and stays at the live edge, where everyone is already in sync. The sync pill shows *Live*.
 
 ### Sharing a tab, screen, or file
 
-A share replaces the YouTube video on the stage with `media: { kind: "live", … }`. The presenter holds one WebRTC connection per viewer and makes every offer; the server only relays signaling, scoped to that share's `streamId`. A viewer with no working connection after 10 seconds asks again (backing off), up to three times, then gets a **Retry** button. A share is never saved to disk.
+A share replaces the video on the stage with `media: { kind: "live", … }`. The presenter holds one WebRTC connection per viewer and makes every offer; the server only relays signaling, scoped to that share's `streamId`. A viewer with no working connection after 10 seconds asks again (backing off), up to three times, then gets a **Retry** button. A share is never saved to disk.
 
 | Limit | Why |
 |---|---|
@@ -241,10 +278,10 @@ A share replaces the YouTube video on the stage with `media: { kind: "live", …
 | `room:denied` | server → client | `removed` / `locked` / `ended` / `full` / `invalid` / `password`. A `password` denial carries `wrong: true` after a bad guess, or `limited: true` when too many guesses were made (that try wasn't checked) |
 | `room:host` | server → clients | Host changed |
 | `room:settings` | server → clients | `{ locked, playback, approval, order, autoplay, voteSkip, hasPassword }` |
-| `room:media` | server → clients | The current video with its title, channel, and thumbnail filled in |
+| `room:media` | server → clients | The current video with its title, channel / author, and thumbnail filled in |
 | `room:notice` | server → client | Private heads-up, e.g. "The host turned off your chat" or a report sent to the host |
 | `room:leave` | client → server | Left the room page |
-| `player:action` | both | `load` / `play` / `pause` / `seek`. `load` carries `media: { kind: "youtube", id, title?, author?, thumb? }`, or `{ kind: "live", source, streamId, presenter, title, by }` for a share (`null` when a share ends), and is echoed to everyone, the sender included. `play` / `pause` / `seek` carry `time` and the video's `key` (`"yt:<id>"`); a stale key is dropped, and a live share has no timeline to drive. From someone without video control the action is refused and they're snapped back (`denied: true`) |
+| `player:action` | both | `load` / `play` / `pause` / `seek`. A client sends `load` with `input` (a pasted link), which the server resolves (see [Paste any link](#-paste-any-link)) and acks `{ ok: true }` or `{ ok: false, error }`. Everyone, the sender included, then gets `load` with `media`: `{ kind: "youtube" \| "file" \| "hls" \| "vimeo" \| "dailymotion" \| "twitch", …, title?, author?, thumb? }`, or `{ kind: "live", source, streamId, presenter, title, by }` for a share (`null` when a share ends). `play` / `pause` / `seek` carry `time` and the video's `key` (e.g. `"yt:<id>"`, `"vimeo:<id>"`, `"file:<url>"`); a stale key is dropped, and a live share has no timeline to drive. From someone without video control the action is refused before any link is fetched, and they're snapped back (`denied: true`) |
 | `player:tick` | server → clients | Heartbeat every 3s: `{ key, time, isPlaying, at }`, used for drift correction |
 | `player:meta` | client → server | A player learned the video's length; trusted from people with video control, from viewers once two of them agree |
 | `player:ended` | client → server | A player reached the end; plays the next queued video when autoplay is on |
@@ -259,7 +296,7 @@ A share replaces the YouTube video on the stage with `media: { kind: "live", …
 | `poll:create` | client → server | `kind: "custom" \| "next" \| "skip" \| "replay"`. Custom and next: host only, with `question`, `options` or `itemIds`, `seconds`, and `binding` (next). Skip and replay: anyone with chat while votes are on. Acked `{ ok, error? }` |
 | `poll:vote` · `poll:close` | client → server | Vote or change your vote / host ends the poll early (it resolves on the votes so far) |
 | `poll:update` · `poll:closed` | server → clients | The running poll with live counts (or `null`) / the result: `{ poll, winner, passed, cancelled }` |
-| `queue:add` | client → server | Suggest a video (`media` or a pasted link); the ack says whether it's `ready` or `pending`, or was a duplicate (counted as a vote) |
+| `queue:add` | client → server | Suggest a video: `input` (any pasted link, resolved like a `load`) or `media`. The ack says whether it's `ready` or `pending`, was a duplicate (counted as a vote), or `{ ok: false, error }` with the reason a link can't play |
 | `queue:approve` · `queue:remove` · `queue:move` · `queue:clear` | client → server | Approve, remove, reorder (manual order only), or clear: host and creator. Anyone can withdraw their own suggestion |
 | `queue:vote` | client → server | Toggle your vote on a ready item |
 | `queue:play` · `queue:skip` | client → server | Play an item now, or skip to the next one: anyone with video control |
@@ -280,7 +317,7 @@ A share replaces the YouTube video on the stage with `media: { kind: "live", …
 | `lobby:subscribe` · `lobby:unsubscribe` · `lobby:list` | both | Live public room list |
 | `vent:post` · `vent:new` · `vent:list` | both | Anonymous board |
 
-Every handler runs through `safe()` in [`server/limits.js`](server/limits.js): payloads are normalized and length-capped, and noisy events (joins, player actions, chat, reactions, polls, signaling, queue changes) are rate limited per socket. Password guesses and password changes are also limited server-wide, per address and per room, so a fresh connection doesn't reset them.
+Every handler runs through `safe()` in [`server/limits.js`](server/limits.js): payloads are normalized and length-capped, and noisy events (joins, player actions, chat, reactions, polls, signaling, queue changes) are rate limited per socket. Resolving a pasted link (anything that isn't YouTube) is also limited per address, server-wide. Password guesses and password changes are also limited server-wide, per address and per room, so a fresh connection doesn't reset them.
 
 </details>
 
@@ -308,7 +345,7 @@ If it runs behind a reverse proxy (as it does on most of these hosts), set `TRUS
 | `NEXT_PUBLIC_SOCKET_URL` | Realtime server URL when the pages are hosted elsewhere (e.g. Vercel → Render) |
 | `DATA_DIR` | Where the room save file lives (default `.data/`, saved as `rooms.json`) |
 | `PERSIST` | Set to `0` to turn off saving rooms to disk |
-| `TRUST_PROXY` | Set to `1` behind a reverse proxy, so password rate limits use the real client address from `X-Forwarded-For` |
+| `TRUST_PROXY` | Set to `1` behind a reverse proxy, so password and link-resolving rate limits use the real client address from `X-Forwarded-For` |
 
 ### Calls and shares: STUN, TURN, and scale
 
@@ -326,7 +363,7 @@ TURN_CREDENTIAL=…
 Phone browsers can't share the screen. The Android app in [`android/`](android/README.md) shows the site in a WebView, so it has every feature, and adds native whole-screen sharing. See its README to install the APK.
 
 > [!NOTE]
-> Browsers allow camera and mic access only on **HTTPS or `localhost`**. To test from a phone on your LAN, use an HTTPS tunnel such as `cloudflared` or `ngrok`. A call mesh works for about 6 people and a share for up to 8 viewers; past that, move to an SFU such as LiveKit or mediasoup.
+> Browsers allow camera and mic access only on **HTTPS or `localhost`**, and Twitch videos only play there too. To test from a phone on your LAN, use an HTTPS tunnel such as `cloudflared` or `ngrok`. A call mesh works for about 6 people and a share for up to 8 viewers; past that, move to an SFU such as LiveKit or mediasoup.
 
 ### Restarts and scaling out
 

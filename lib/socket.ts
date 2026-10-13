@@ -40,13 +40,39 @@ export type RoomSettings = {
   hasPassword: boolean;
 };
 
-export type YoutubeMedia = {
-  kind: "youtube";
-  id: string;
+/** Fields every playable video can carry (filled in by the server). */
+type VideoInfo = {
   title?: string | null;
   author?: string | null;
   thumb?: string;
+  /** Seconds, when the source told us. */
+  duration?: number;
+  /** The page the link came from, for "open original". */
+  source?: string;
 };
+
+export type YoutubeMedia = VideoInfo & { kind: "youtube"; id: string };
+/** A direct video file (.mp4 / .webm / .mov / .ogv …), played by <video>. */
+export type FileMedia = VideoInfo & { kind: "file"; url: string; mime?: string };
+/** An HLS stream (.m3u8), played by <video> + hls.js (native on Safari). */
+export type HlsMedia = VideoInfo & { kind: "hls"; url: string };
+export type VimeoMedia = VideoInfo & { kind: "vimeo"; id: string; hash?: string };
+export type DailymotionMedia = VideoInfo & { kind: "dailymotion"; id: string };
+/** A past broadcast ("video") or a live channel ("channel"). */
+export type TwitchMedia = VideoInfo & {
+  kind: "twitch";
+  type: "video" | "channel";
+  id: string;
+};
+
+/** Anything with a shared timeline the room can sync. */
+export type VideoMedia =
+  | YoutubeMedia
+  | FileMedia
+  | HlsMedia
+  | VimeoMedia
+  | DailymotionMedia
+  | TwitchMedia;
 
 export type ShareSource = "tab" | "screen" | "file" | "camera";
 
@@ -64,22 +90,56 @@ export type LiveMedia = {
 };
 
 /** What's on the stage. */
-export type Media = YoutubeMedia | LiveMedia;
+export type Media = VideoMedia | LiveMedia;
 
-/** Stable identity of a piece of media; play/pause/seek/ended carry it. */
+/** Stable identity of a piece of media; play/pause/seek/ended carry it.
+    Must match server/media.js key(). */
 export function mediaKey(m: Media | null | undefined): string | null {
   if (!m) return null;
-  return m.kind === "youtube" ? `yt:${m.id}` : `live:${m.streamId}`;
+  switch (m.kind) {
+    case "youtube":
+      return `yt:${m.id}`;
+    case "file":
+    case "hls":
+      return `${m.kind}:${m.url}`;
+    case "vimeo":
+      return `vimeo:${m.id}`;
+    case "dailymotion":
+      return `dm:${m.id}`;
+    case "twitch":
+      return `twitch:${m.type}:${m.id}`;
+    case "live":
+      return `live:${m.streamId}`;
+  }
 }
 
-/** Only YouTube has a shared timeline (sync, reactions moments, queue). */
-export function isTimed(m: Media | null | undefined): m is YoutubeMedia {
-  return !!m && m.kind === "youtube";
+/** Everything except a live share has a shared timeline (sync, moments,
+    queue, history). Some may still be live streams (YouTube live, Twitch
+    channels) — the player detects that and never seeks them. */
+export function isTimed(m: Media | null | undefined): m is VideoMedia {
+  return !!m && m.kind !== "live";
 }
+
+/** A thumbnail for any video, or null. */
+export function mediaThumb(m: VideoMedia): string | null {
+  if (m.thumb) return m.thumb;
+  if (m.kind === "youtube") return `https://i.ytimg.com/vi/${m.id}/mqdefault.jpg`;
+  return null;
+}
+
+/** Human label for where a video comes from. */
+export const SOURCE_LABEL: Record<VideoMedia["kind"], string> = {
+  youtube: "YouTube",
+  file: "Video file",
+  hls: "Stream",
+  vimeo: "Vimeo",
+  dailymotion: "Dailymotion",
+  twitch: "Twitch",
+};
 
 export type QueueItem = {
   id: string;
-  media: YoutubeMedia;
+  media: VideoMedia;
   by: { name: string; color: string };
   /** Browser tag of whoever suggested it (compare with your selfBrowser). */
   browser: string;
@@ -96,7 +156,7 @@ export type QueueItem = {
 export type QueueState = {
   items: QueueItem[];
   /** Recently played, newest first. */
-  history: { media: YoutubeMedia; playedAt: number }[];
+  history: { media: VideoMedia; playedAt: number }[];
 };
 
 /** Reply to queue:add / queue:skip. */

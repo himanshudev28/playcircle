@@ -10,8 +10,12 @@ import {
   type PlayerTick,
   type RoomSnapshot,
 } from "@/lib/socket";
+import { createPlayer, reusePlayer } from "./players";
+import type { PlayerState, StagePlayer } from "./players/types";
 
-/* The shared YouTube player.
+/* The shared video player — any kind (YouTube, a file or HLS stream, Vimeo,
+   Dailymotion, Twitch), driven through the StagePlayer interface so this
+   engine never cares which site a video came from.
 
    The server owns the playhead: { media, time, isPlaying, at } where `time`
    was true at server clock `at`. Every snapshot, action and ~3s tick carries
@@ -20,47 +24,28 @@ import {
    reported up — but only when it actually differs from the room, so a player
    settling after a correction can never echo back as an action.
 
-   The iframe lives in a div React never renders children into (YouTube swaps
-   its target element for an iframe; letting React own that node breaks
+   The player lives in a div React never renders children into (embeds swap
+   or fill their target element; letting React own that node breaks
    unmounting when the stage clears).
 
-   Only YouTube media has a shared timeline. When the stage holds a live
-   share (LiveMedia) or nothing, the YouTube player is torn down and every
-   timeline path (ticks, meta, ended, corrections) stays idle. */
-
-let apiLoading: Promise<void> | null = null;
-function loadYouTubeApi(): Promise<void> {
-  if (typeof window === "undefined") return Promise.resolve();
-  if (window.YT && window.YT.Player) return Promise.resolve();
-  if (apiLoading) return apiLoading;
-  apiLoading = new Promise<void>((resolve) => {
-    const tag = document.createElement("script");
-    tag.src = "https://www.youtube.com/iframe_api";
-    window.onYouTubeIframeAPIReady = () => resolve();
-    document.head.appendChild(tag);
-  });
-  return apiLoading;
-}
+   Only VideoMedia has a shared timeline. When the stage holds a live share
+   (LiveMedia) or nothing, the player is torn down and every timeline path
+   (ticks, meta, ended, corrections) stays idle. A video of a different kind
+   always gets a fresh player; YouTube → YouTube reuses its iframe. */
 
 /** The room's authoritative playhead: `time` was true at server clock `at`. */
 type Playhead = { key: string; time: number; isPlaying: boolean; at: number };
 
 // Live streams must never be seeked to an absolute time — that lands
 // outside the DVR window ("recording not available"); live viewers are
-// already together at the live edge. YouTube's getDuration() for a live
-// stream is the time since it started (so a 2h-old stream says 7200), which
-// is why liveness is read from getVideoData().isLive or a duration that
-// keeps growing (see isLive below). As a fallback, an absurd duration
-// (~1e8s for manifestless streams) of a day or more also counts as live.
+// already together at the live edge. A live stream's duration is often the
+// time since it started (so a 2h-old stream says 7200), which is why
+// liveness comes from the adapter's isLive() or a duration that keeps
+// growing (see isLive below). As a fallback, an absurd duration (~1e8s for
+// manifestless streams, Infinity for <video>) of a day or more also counts.
 const MAX_VOD = 86_400;
 const isVod = (d: number | null | undefined): d is number =>
   typeof d === "number" && d > 0 && d < MAX_VOD;
-
-type YTExtras = {
-  getVideoData?: () => { isLive?: boolean } | undefined;
-  getPlaybackRate?: () => number;
-};
-const extras = (p: YT.Player) => p as unknown as YTExtras;
 
 /** What we last told the player to do; state events matching it are ours. */
 type Expect = "playing" | "paused" | null;
@@ -70,6 +55,18 @@ const APPLY_DRIFT = 0.6; // explicit remote actions snap tighter
 const SETTLE_MS = 2_500; // hands off after a remote action or a local seek
 const SEEK_COOLDOWN_MS = 4_000; // between corrective seeks
 const ECHO_MS = 800; // state changes this soon after we drove the player are ours
+// Buffering inside the echo window stretches it (an async embed — Vimeo,
+// Twitch, Dailymotion — may take seconds to report where it landed), but
+// never past this long after we drove it.
+const ECHO_MAX_MS = 8_000;
+// A seek we made is "in flight" until the player reports a time near its
+// target, or this long; position reports meanwhile are ours, not a scrub.
+const DRIVEN_SEEK_MS = 5_000;
+// A no-control viewer's player settling right after a video loads (first
+// play snap, late-join seek, buffering) is never their doing: re-sync it
+// quietly instead of telling them "only the host can control the video".
+const LOAD_QUIET_MS = 10_000;
+const FIRST_PLAY_QUIET_MS = 4_000;
 const BUFFER_SHOW_MS = 600;
 const CATCH_UP_MS = 2_500;
 const SNAP_MS = 1_500; // rate limit for snapping a no-control viewer back
@@ -111,13 +108,16 @@ export function useSyncedPlayer({
   const [live, setLive] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [drift, setDrift] = useState<number | null>(null);
-  // Known VOD length of the YouTube video on stage (null: live, unknown, or
-  // not YouTube at all).
+  // Known VOD length of the video on stage (null: live, unknown, or not a
+  // video at all).
   const [duration, setDuration] = useState<number | null>(null);
+  // The player couldn't play the video on stage (blocked embed, removed,
+  // unsupported format…): a human message, shown over the player.
+  const [error, setError] = useState<string | null>(null);
 
   const mountRef = useRef<HTMLDivElement>(null);
   const ctlRef = useRef<Controller | null>(null);
-  // Latest props, read from YouTube and socket callbacks.
+  // Latest props, read from player and socket callbacks.
   const optsRef = useRef({ serverNow, canControl, onToast, onNoControl });
   useEffect(() => {
     optsRef.current = { serverNow, canControl, onToast, onNoControl };
@@ -127,9 +127,11 @@ export function useSyncedPlayer({
     const socket = getSocket();
     let disposed = false;
 
-    let player: YT.Player | null = null;
+    let player: StagePlayer | null = null;
     let ready = false;
-    let loadedKey: string | null = null; // what the YouTube player holds
+    // Bumped for every player built; callbacks from an older one are stale.
+    let playerGen = 0;
+    let loadedKey: string | null = null; // what the player holds
     let stage: Media | null = null; // latest stage from the server
     let head: Playhead | null = null;
     let roomDuration: number | null = null;
@@ -137,6 +139,10 @@ export function useSyncedPlayer({
     let echoUntil = 0;
     let echoExpect: Expect = null;
     let echoSettled = false; // the player got to echoExpect inside the window
+    let echoStart = 0; // when the current echo window was opened
+    // Our last seek, until the player is seen near its target.
+    let drivenSeek: { t: number; playing: boolean; at: number } | null = null;
+    let quietUntil = 0; // viewer snaps before this are silent (see LOAD_QUIET_MS)
     let remoteAppliedAt = 0;
     let localActionAt = 0;
     let lastFixSeek = 0;
@@ -156,7 +162,7 @@ export function useSyncedPlayer({
     // playback — so the autoplay gate should never reappear after that.
     let hasInteracted = false;
     let gateShown = false;
-    let recoveredKey: string | null = null;
+    let erroredKey: string | null = null; // loadedKey, once its player failed
     let metaSentKey: string | null = null;
     let endedSentKey: string | null = null;
     let liveKey: string | null = null; // loadedKey, once known to be live
@@ -174,17 +180,34 @@ export function useSyncedPlayer({
     const expected = (h: Playhead) =>
       h.time + (h.isPlaying ? Math.max(0, now() - h.at) / 1000 : 0);
 
-    const durationOf = (p: YT.Player) => {
+    // Adapters promise never to throw and to say 0 while unknown; NaN and
+    // negatives are read as unknown anyway. Infinity (a live <video>) stays.
+    const durationOf = (p: StagePlayer) => {
       try {
-        return p.getDuration() || 0;
+        const d = p.getDuration();
+        return d > 0 ? d : 0;
       } catch {
         return 0;
       }
     };
 
-    const rateOf = (p: YT.Player) => {
+    const timeOf = (p: StagePlayer) => {
+      const t = p.getTime();
+      if (!Number.isFinite(t)) throw new Error("no time");
+      return t;
+    };
+
+    const stateOf = (p: StagePlayer): PlayerState => {
       try {
-        return extras(p).getPlaybackRate?.() || 1;
+        return p.getState();
+      } catch {
+        return "unstarted";
+      }
+    };
+
+    const rateOf = (p: StagePlayer) => {
+      try {
+        return p.getRate() || 1;
       } catch {
         return 1;
       }
@@ -196,15 +219,16 @@ export function useSyncedPlayer({
       setLive(true);
     };
 
-    // Is the loaded video a live stream? YouTube says so directly; failing
+    // Is the loaded video a live stream? The adapter says so directly (e.g.
+    // YouTube's isLive flag, a Twitch channel, HLS without an end); failing
     // that, a day-plus duration does (the sampler also catches a duration
     // that keeps growing). Sticky per video once seen.
-    const isLive = (p: YT.Player) => {
+    const isLive = (p: StagePlayer) => {
       if (!loadedKey) return false;
       if (liveKey === loadedKey) return true;
       let live = false;
       try {
-        live = !!extras(p).getVideoData?.()?.isLive;
+        live = !!p.isLive();
       } catch {
         /* noop */
       }
@@ -216,7 +240,7 @@ export function useSyncedPlayer({
     // A length we may seek within, or null for live / not-yet-known. A
     // freshly cued player often reports 0; the room's own duration (only
     // ever set for real VODs) stands in until it knows.
-    const seekableLength = (p: YT.Player) => {
+    const seekableLength = (p: StagePlayer) => {
       if (isLive(p)) return null;
       const d = durationOf(p);
       if (isVod(d)) return d;
@@ -227,20 +251,18 @@ export function useSyncedPlayer({
     // Mark the player as driven by us for `ms`. State events consistent
     // with `expect` in that window are ours; null swallows everything.
     const markDriven = (expect: Expect, ms = ECHO_MS) => {
-      echoUntil = Date.now() + ms;
+      echoStart = Date.now();
+      echoUntil = echoStart + ms;
       echoExpect = expect;
       echoSettled = false;
       // Already there (e.g. a seek while playing): the opposite state from
       // here on is a person, not us.
-      try {
-        const s = readyPlayer()?.getPlayerState();
-        const S = window.YT!.PlayerState;
-        echoSettled =
-          (expect === "playing" && s === S.PLAYING) ||
-          (expect === "paused" && (s === S.PAUSED || s === S.CUED));
-      } catch {
-        /* noop */
-      }
+      const p = readyPlayer();
+      if (!p) return;
+      const s = stateOf(p);
+      echoSettled =
+        (expect === "playing" && s === "playing") ||
+        (expect === "paused" && s === "paused");
     };
 
     const noteTime = (t: number, advancing: boolean) => {
@@ -251,11 +273,37 @@ export function useSyncedPlayer({
 
     // Is `t` somewhere playback alone couldn't have taken us since the last
     // noted time? Unknown (false) after a long gap, e.g. throttled timers.
-    const jumpedTo = (p: YT.Player, t: number) => {
+    const jumpedTo = (p: StagePlayer, t: number) => {
       const elapsed = (Date.now() - lastTimeAt) / 1000;
       if (lastAdvancing && elapsed > 5) return false;
       const ahead = lastAdvancing ? elapsed * Math.max(1, rateOf(p)) : 0;
       return t < lastTime - JUMP || t > lastTime + ahead + JUMP;
+    };
+
+    // We seeked the player to `t`: until it's seen there, the positions it
+    // reports (an async embed's cached time lags the seek) are ours.
+    const noteDrivenSeek = (t: number, playing: boolean) => {
+      drivenSeek = { t, playing, at: Date.now() };
+      noteTime(t, playing);
+    };
+
+    // Judge a position read from the player against our last seek:
+    // "pending" — still on its way there (a stale report; never a scrub),
+    // "landed" — it just got there (ours too), "none" — no seek of ours.
+    const seekGuard = (p: StagePlayer, t: number): "none" | "pending" | "landed" => {
+      const s = drivenSeek;
+      if (!s) return "none";
+      const since = Date.now() - s.at;
+      if (since > DRIVEN_SEEK_MS) {
+        drivenSeek = null;
+        return "none";
+      }
+      const ahead = s.playing ? (since / 1000) * Math.max(1, rateOf(p)) : 0;
+      if (t >= s.t - JUMP && t <= s.t + ahead + JUMP) {
+        drivenSeek = null;
+        return "landed";
+      }
+      return "pending";
     };
 
     const readyPlayer = () => (player && ready ? player : null);
@@ -268,24 +316,22 @@ export function useSyncedPlayer({
     // Browsers block programmatic autoplay without a user gesture. If the
     // video hasn't actually started shortly after, surface a tap-to-start
     // gate. Buffering gets one more look before we decide.
-    const play = (p: YT.Player) => {
-      p.playVideo();
+    const play = (p: StagePlayer) => {
+      p.play();
       clearTimeout(gateTimer);
       const check = (again: boolean) => {
         if (hasInteracted || player !== p) return;
         // Paused (or swapped) since: not playing is right, so no gate.
         if (!head || !head.isPlaying || head.key !== loadedKey) return;
-        try {
-          const s = p.getPlayerState();
-          if (s === window.YT!.PlayerState.PLAYING) return;
-          if (s === window.YT!.PlayerState.BUFFERING && again) {
-            gateTimer = setTimeout(() => check(false), 1300);
-            return;
-          }
-          showGate(true);
-        } catch {
-          /* noop */
+        // A player that failed shows its error, not a play button.
+        if (erroredKey === loadedKey) return;
+        const s = stateOf(p);
+        if (s === "playing") return;
+        if (s === "buffering" && again) {
+          gateTimer = setTimeout(() => check(false), 1300);
+          return;
         }
+        showGate(true);
       };
       gateTimer = setTimeout(() => check(true), 1200);
     };
@@ -297,27 +343,29 @@ export function useSyncedPlayer({
     };
 
     // `playing`: the state the room wants the player in around this seek.
-    const syncSeek = (p: YT.Player, t: number, playing: boolean) => {
+    const syncSeek = (p: StagePlayer, t: number, playing: boolean) => {
       markDriven(playing ? "playing" : "paused");
-      p.seekTo(t, true);
-      noteTime(t, playing);
+      p.seek(t);
+      noteDrivenSeek(t, playing);
       flashCatchingUp();
     };
 
     // Duration is learned lazily: report it once per video (the server only
     // trusts it from people with video control) and spot live streams. Never
     // for live, and only once it has held still a moment — a live stream's
-    // "duration" keeps growing, in case YouTube didn't say it was live.
-    const noteLength = (p: YT.Player) => {
-      const d = durationOf(p);
-      if (d <= 0) return;
+    // "duration" keeps growing, in case the adapter didn't say it was live.
+    const noteLength = (p: StagePlayer) => {
+      // Liveness first: a live stream may never report a duration at all
+      // (a Twitch channel, a live HLS), and it still wants "Live" shown.
       const live = isLive(p);
       setLive(live);
+      if (live) setDuration(null);
+      const d = durationOf(p);
+      if (d <= 0 || live) return;
       const t0 = Date.now();
       if (Math.abs(d - durSeen.d) > 0.01) durSeen = { d, at: t0 };
-      const stable = !live && isVod(d) && t0 - durSeen.at >= META_STABLE_MS;
-      if (live) setDuration(null);
-      else if (stable) setDuration(d);
+      const stable = isVod(d) && t0 - durSeen.at >= META_STABLE_MS;
+      if (stable) setDuration(d);
       if (stable && loadedKey && metaSentKey !== loadedKey) {
         metaSentKey = loadedKey;
         socket.emit("player:meta", { key: loadedKey, duration: d });
@@ -343,6 +391,7 @@ export function useSyncedPlayer({
       const p = readyPlayer();
       const h = head;
       if (!p || !h || h.key !== loadedKey) return;
+      if (erroredKey === loadedKey) return; // nothing to steer
       remoteAppliedAt = Date.now();
       markDriven(h.isPlaying ? "playing" : "paused");
       try {
@@ -354,7 +403,7 @@ export function useSyncedPlayer({
         const untouched = !h.isPlaying && playedKey !== loadedKey;
         if (len !== null && !untouched) {
           seekOnPlay = false;
-          if (t < len && Math.abs(p.getCurrentTime() - t) > APPLY_DRIFT) {
+          if (t < len && Math.abs(timeOf(p) - t) > APPLY_DRIFT) {
             syncSeek(p, t, h.isPlaying);
           }
         } else {
@@ -365,7 +414,7 @@ export function useSyncedPlayer({
         if (h.isPlaying) play(p);
         else {
           clearTimeout(gateTimer);
-          p.pauseVideo();
+          p.pause();
         }
       } catch {
         /* player not fully ready */
@@ -377,6 +426,7 @@ export function useSyncedPlayer({
       const p = readyPlayer();
       const h = head;
       if (!p || !h || h.key !== loadedKey) return;
+      if (erroredKey === loadedKey) return;
       noteLength(p);
       if (gateShown) return;
       const t0 = Date.now();
@@ -386,24 +436,23 @@ export function useSyncedPlayer({
       const len = durationOf(p);
       if (!isVod(len) || isLive(p)) return; // live, or not loaded yet
       try {
-        const S = window.YT!.PlayerState;
-        const state = p.getPlayerState();
-        if (
-          h.isPlaying &&
-          (state === S.PAUSED || state === S.CUED || state === S.UNSTARTED)
-        ) {
+        const state = stateOf(p);
+        if (h.isPlaying && (state === "paused" || state === "unstarted")) {
           markDriven("playing");
           play(p);
         } else if (
           !h.isPlaying &&
-          (state === S.PLAYING || state === S.BUFFERING)
+          (state === "playing" || state === "buffering")
         ) {
           markDriven("paused");
           clearTimeout(gateTimer);
-          p.pauseVideo();
+          p.pause();
         }
         const exp = Math.min(expected(h), len);
-        const off = p.getCurrentTime() - exp;
+        const cur = timeOf(p);
+        // Our last seek hasn't landed yet: the reading is stale, not drift.
+        if (seekGuard(p, cur) === "pending") return;
+        const off = cur - exp;
         setDrift(Math.round(off * 10) / 10);
         if (
           Math.abs(off) > DRIFT_MAX &&
@@ -421,7 +470,7 @@ export function useSyncedPlayer({
     // Take on a new authoritative state from the server.
     const adopt = (m: Media | null, time: number, playing: boolean, at: number) => {
       const changed = mediaKey(m) !== mediaKey(stage);
-      // Only timed (YouTube) media has a playhead; a live share has none.
+      // Only timed media (any video) has a playhead; a live share has none.
       const key = isTimed(m) ? mediaKey(m) : null;
       stage = m;
       head = key ? { key, time, isPlaying: playing, at } : null;
@@ -433,6 +482,7 @@ export function useSyncedPlayer({
         setBuffering(false);
         setCatchingUp(false);
         setDuration(null);
+        setError(null);
         if (!key) {
           showGate(false);
           metaSentKey = null;
@@ -444,7 +494,7 @@ export function useSyncedPlayer({
       // Otherwise build / swap / clear the player; the head is applied once
       // it's ready. (Called here, not from an effect on `media`, so a stage
       // that React already shows — e.g. after a hot reload — still loads.)
-      else void loadStage();
+      else loadStage();
     };
 
     /* ---- Player → room ---- */
@@ -452,7 +502,10 @@ export function useSyncedPlayer({
     const userDid = (type: "play" | "pause" | "seek", t: number) => {
       const key = loadedKey;
       if (!key) return;
-      if (type === "seek" && liveKey === key) return; // live has no position
+      // A live stream has no position.
+      if (type === "seek" && (liveKey === key || (player && isLive(player)))) {
+        return;
+      }
       const h = head && head.key === key ? head : null;
       if (h) {
         if (type === "play" && h.isPlaying) return;
@@ -467,8 +520,9 @@ export function useSyncedPlayer({
         if (t0 - lastSnap < SNAP_MS) return;
         lastSnap = t0;
         socket.emit("player:request-sync");
-        // Pressing play (e.g. past an autoplay block) just syncs quietly.
-        if (type !== "play") optsRef.current.onNoControl();
+        // Pressing play (e.g. past an autoplay block) just syncs quietly,
+        // and so does a player still settling after a load.
+        if (type !== "play" && t0 >= quietUntil) optsRef.current.onNoControl();
         return;
       }
       localActionAt = Date.now();
@@ -481,17 +535,15 @@ export function useSyncedPlayer({
       setIsPlaying(playing);
     };
 
-    const onStateChange = (e: { target: YT.Player; data: number }) => {
-      const p = e.target;
-      if (p !== player) return;
-      const S = window.YT!.PlayerState;
-      trackBuffering(e.data === S.BUFFERING);
-      if (e.data === S.PLAYING || e.data === S.CUED) noteLength(p);
+    const onStateChange = (p: StagePlayer, state: PlayerState) => {
+      if (p !== player || !ready) return;
+      trackBuffering(state === "buffering");
+      if (state !== "buffering") noteLength(p);
 
       // A live stream "ending" is the broadcast stopping, not the room's
       // video running out — never report it.
       if (
-        e.data === S.ENDED &&
+        state === "ended" &&
         loadedKey &&
         endedSentKey !== loadedKey &&
         !isLive(p)
@@ -500,22 +552,22 @@ export function useSyncedPlayer({
         socket.emit("player:ended", { key: loadedKey });
       }
 
-      if (e.data === S.PLAYING && gateShown) {
-        // They pressed play inside the iframe: the gate's job is done.
+      if (state === "playing" && gateShown) {
+        // They pressed play inside the player: the gate's job is done.
         hasInteracted = true;
         showGate(false);
         socket.emit("player:request-sync");
       }
 
       // A deferred late-join seek: now that it plays, the length is known.
-      if (e.data === S.PLAYING && seekOnPlay) {
+      if (state === "playing" && seekOnPlay) {
         seekOnPlay = false;
         const h = head;
         const len = seekableLength(p);
         if (h && h.key === loadedKey && len !== null) {
           const t = expected(h);
           try {
-            if (t < len && Math.abs(p.getCurrentTime() - t) > APPLY_DRIFT) {
+            if (t < len && Math.abs(timeOf(p) - t) > APPLY_DRIFT) {
               syncSeek(p, t, h.isPlaying);
               return;
             }
@@ -527,16 +579,27 @@ export function useSyncedPlayer({
 
       let t: number;
       try {
-        t = p.getCurrentTime();
+        t = timeOf(p);
       } catch {
         return;
       }
+      // Our own seek still landing: positions on the way are ours, and so
+      // is the settling around it — keep the echo window open meanwhile.
+      const guard = seekGuard(p, t);
+      if (guard === "pending") {
+        echoUntil = Math.max(echoUntil, Date.now() + ECHO_MS);
+      }
       // Detect a scrub: a jump playback alone couldn't explain.
       const firstRun = playedKey !== loadedKey;
-      const jumped = !firstRun && jumpedTo(p, t);
-      noteTime(t, e.data === S.PLAYING || e.data === S.BUFFERING);
-      if (firstRun && e.data === S.PLAYING) {
+      const jumped = !firstRun && guard === "none" && jumpedTo(p, t);
+      // A stale position (seek pending) would make the landing look like a
+      // jump; keep the seek target as the reference until then.
+      if (guard !== "pending") {
+        noteTime(t, state === "playing" || state === "buffering");
+      }
+      if (firstRun && state === "playing") {
         playedKey = loadedKey;
+        quietUntil = Math.max(quietUntil, Date.now() + FIRST_PLAY_QUIET_MS);
         // First play of a fresh player: start from the room's playhead, not
         // wherever the player happened to land.
         const h = head;
@@ -551,29 +614,38 @@ export function useSyncedPlayer({
         }
       }
 
+      // Still buffering toward what we asked for: stretch the echo window so
+      // the state it settles in (often seconds later on an async embed)
+      // still reads as ours.
+      if (state === "buffering" && Date.now() < echoUntil) {
+        echoUntil = Math.max(
+          echoUntil,
+          Math.min(echoStart + ECHO_MAX_MS, Date.now() + ECHO_MS)
+        );
+      }
+
       if (Date.now() < echoUntil) {
         // We drove the player a moment ago: drop the state we sent it to and
         // anything on the way there. Only the opposite state, after it got
         // there (a pause while we made it play, or vice versa), is a person.
         const reached =
-          (echoExpect === "playing" && e.data === S.PLAYING) ||
-          (echoExpect === "paused" &&
-            (e.data === S.PAUSED || e.data === S.CUED));
+          (echoExpect === "playing" && state === "playing") ||
+          (echoExpect === "paused" && state === "paused");
         if (reached) {
           echoSettled = true;
           return;
         }
         const contrary =
-          (echoExpect === "playing" && e.data === S.PAUSED) ||
-          (echoExpect === "paused" && e.data === S.PLAYING);
+          (echoExpect === "playing" && state === "paused") ||
+          (echoExpect === "paused" && state === "playing");
         if (!echoSettled || !contrary) return;
         echoUntil = 0;
-        userDid(e.data === S.PLAYING ? "play" : "pause", t);
+        userDid(state === "playing" ? "play" : "pause", t);
         return;
       }
       if (jumped && !isLive(p)) userDid("seek", t);
-      if (e.data === S.PLAYING) userDid("play", t);
-      if (e.data === S.PAUSED) userDid("pause", t);
+      if (state === "playing") userDid("play", t);
+      if (state === "paused") userDid("pause", t);
     };
 
     /* ---- The stage ---- */
@@ -582,6 +654,7 @@ export function useSyncedPlayer({
       clearTimeout(gateTimer);
       clearTimeout(bufferTimer);
       bufferTimer = undefined;
+      playerGen++;
       try {
         player?.destroy();
       } catch {
@@ -590,12 +663,14 @@ export function useSyncedPlayer({
       player = null;
       ready = false;
       loadedKey = null;
+      erroredKey = null;
       mountRef.current?.replaceChildren();
     };
 
-    const loadStage = async () => {
+    const loadStage = () => {
+      if (disposed) return;
       const m = stage;
-      // A live share (or an empty stage) has no YouTube player at all.
+      // A live share (or an empty stage) has no player at all.
       if (!isTimed(m)) {
         destroyPlayer();
         return;
@@ -603,83 +678,100 @@ export function useSyncedPlayer({
       const key = mediaKey(m);
       if (key === loadedKey) return;
       if (!key) return;
-      await loadYouTubeApi();
-      if (disposed || mediaKey(stage) !== key || key === loadedKey) return;
 
       const h = head && head.key === key ? head : null;
       // Start mid-video only for a known VOD length; a live stream must start
-      // at its live edge (no startSeconds at all).
+      // at its live edge (no start at all).
       const at = h ? expected(h) : 0;
       const start = isVod(roomDuration) && at > 1 && at < roomDuration ? at : 0;
       seekOnPlay = !!h && start === 0 && at > APPLY_DRIFT;
       noteTime(start, false);
-      recoveredKey = null;
+      drivenSeek = null;
+      quietUntil = Date.now() + LOAD_QUIET_MS;
       lastDur = 0;
       durGrowth = 0;
       durSeen = { d: 0, at: 0 };
 
+      // Same kind and the adapter can swap videos in place (YouTube): keep
+      // the iframe, and the user gesture it may already have.
       const existing = readyPlayer();
-      if (existing) {
+      if (existing && erroredKey !== loadedKey) {
+        const autoplay = !h || h.isPlaying;
+        const prevKey = loadedKey;
         loadedKey = key;
         remoteAppliedAt = Date.now();
-        markDriven(!h || h.isPlaying ? "playing" : "paused");
+        markDriven(autoplay ? "playing" : "paused");
         echoSettled = false; // that was the old video's state, not this one's
-        try {
-          if (!h || h.isPlaying) {
-            existing.loadVideoById(m.id, start || undefined);
-            play(existing);
-          } else {
-            existing.cueVideoById(m.id, start || undefined);
-          }
-        } catch {
-          /* noop */
+        if (reusePlayer(existing, m, { start: start || undefined, autoplay })) {
+          if (autoplay) play(existing);
+          return;
         }
-        return;
+        loadedKey = prevKey;
       }
 
-      // No player yet (or one still booting with the old video): start fresh.
+      // No player yet, one of another kind, one still booting with the old
+      // video, or one that failed: start fresh.
       destroyPlayer();
       const mount = mountRef.current;
       if (!mount) return;
       const el = document.createElement("div");
+      el.style.position = "absolute";
+      el.style.inset = "0";
       mount.appendChild(el);
       loadedKey = key;
-      const created: YT.Player = new window.YT!.Player(el, {
-        videoId: m.id,
-        width: "100%",
-        height: "100%",
-        playerVars: {
-          autoplay: 0,
-          modestbranding: 1,
-          rel: 0,
-          playsinline: 1,
-          ...(start ? { start: Math.floor(start) } : {}),
-        },
-        events: {
-          onReady: () => {
-            if (player !== created) return;
-            ready = true;
-            applyHead();
+      const gen = playerGen;
+      // Callbacks from a player we've since replaced (or after unmount) are stale.
+      const current = () => gen === playerGen && !disposed;
+      let created: StagePlayer;
+      try {
+        created = createPlayer(el, m, {
+          start: start || undefined,
+          // The engine starts playback itself once the player is ready —
+          // inside its echo window, with the autoplay gate watching.
+          autoplay: false,
+          events: {
+            onReady: () => {
+              if (!current()) return;
+              ready = true;
+              // An adapter may be ready before createPlayer even returns;
+              // then the head is applied right after it does, below.
+              if (!player) return;
+              applyHead();
+              noteLength(player);
+            },
+            onState: (s) => {
+              if (current() && player) onStateChange(player, s);
+            },
+            onError: (message) => {
+              if (current()) failed(message);
+            },
           },
-          onError: (e) => {
-            // A live stream seeked outside its DVR window throws "recording
-            // not available". Recover once per video by reloading at the
-            // live edge (no seek). Guard against reload loops.
-            if (player !== created || !loadedKey || recoveredKey === loadedKey) {
-              return;
-            }
-            recoveredKey = loadedKey;
-            markDriven(null, 1000);
-            try {
-              e.target.loadVideoById(isTimed(stage) ? stage.id : m.id);
-            } catch {
-              /* noop */
-            }
-          },
-          onStateChange,
-        },
-      });
+        });
+      } catch {
+        // Adapters shouldn't throw; if one does, it's this video that failed.
+        failed("This video can't be played here");
+        return;
+      }
       player = created;
+      if (ready) {
+        applyHead();
+        noteLength(created);
+      }
+    };
+
+    // The player can't play this video: say why, once, and stop steering it.
+    // The player itself stays (it may show its own message) until the stage
+    // changes.
+    const failed = (message: string) => {
+      if (!loadedKey || erroredKey === loadedKey) return;
+      erroredKey = loadedKey;
+      seekOnPlay = false;
+      clearTimeout(gateTimer);
+      showGate(false);
+      trackBuffering(false);
+      setCatchingUp(false);
+      setError(message);
+      optsRef.current.onToast(message);
     };
 
     /* ---- Socket ---- */
@@ -742,7 +834,7 @@ export function useSyncedPlayer({
       if (!isTimed(stage) || !isTimed(m) || mediaKey(m) !== mediaKey(stage)) {
         return;
       }
-      stage = { ...stage, ...m };
+      stage = { ...stage, ...m } as Media;
       setMedia(stage);
     };
 
@@ -768,20 +860,23 @@ export function useSyncedPlayer({
     // paused) or land before it does, instead of silently overwriting them.
     const sampler = setInterval(() => {
       const p = readyPlayer();
-      if (!p) return;
+      if (!p || erroredKey === loadedKey) return;
       try {
         // A "duration" that keeps growing is a live stream.
         const d = durationOf(p);
         if (lastDur > 0 && d > lastDur + 0.5 && ++durGrowth >= 2) markLive();
         lastDur = d;
 
-        const S = window.YT!.PlayerState;
-        const state = p.getPlayerState();
+        const state = stateOf(p);
         // Mid-transition: leave the reference for the state event to judge.
-        if (state === S.BUFFERING || state === S.UNSTARTED) return;
-        const t = p.getCurrentTime();
-        const jumped = jumpedTo(p, t);
-        noteTime(t, state === S.PLAYING);
+        if (state === "buffering" || state === "unstarted") return;
+        const t = timeOf(p);
+        // Our own seek still landing (an async embed's cached time lags
+        // it): not a scrub, and not a reference point either.
+        const guard = seekGuard(p, t);
+        if (guard === "pending") return;
+        const jumped = guard === "none" && jumpedTo(p, t);
+        noteTime(t, state === "playing");
         // Our own seeks and remote applies sit inside the echo window.
         if (!jumped || Date.now() < echoUntil || isLive(p)) return;
         if (playedKey !== loadedKey) return; // still settling on first load
@@ -800,7 +895,7 @@ export function useSyncedPlayer({
         // never resume a paused room by itself.
         if (head && head.isPlaying && head.key === loadedKey) {
           try {
-            player?.playVideo();
+            player?.play();
           } catch {
             /* noop */
           }
@@ -823,14 +918,14 @@ export function useSyncedPlayer({
         setBuffering(false);
         setCatchingUp(false);
         setDuration(null);
+        setError(null);
       },
-      // The YouTube playhead right now, or null when nothing timed is loaded.
+      // The video's playhead right now, or null when nothing timed is loaded.
       getVideoTime: () => {
         const p = readyPlayer();
         if (!p || !isTimed(stage) || loadedKey !== mediaKey(stage)) return null;
         try {
-          const t = p.getCurrentTime();
-          return Number.isFinite(t) ? t : null;
+          return timeOf(p);
         } catch {
           return null;
         }
@@ -846,17 +941,19 @@ export function useSyncedPlayer({
         const key = mediaKey(stage);
         if (!key || liveKey === key) return; // a live stream has no position
         const p = readyPlayer();
-        const len = p && loadedKey === key ? seekableLength(p) : null;
+        const mine = p && loadedKey === key ? p : null;
+        if (mine && isLive(mine)) return;
+        const len = mine ? seekableLength(mine) : null;
         const known = len ?? (isVod(roomDuration) ? roomDuration : null);
         let t = Math.max(0, target);
         if (known !== null) t = Math.min(t, Math.max(0, known - 0.5));
         const playing = !!(head && head.key === key && head.isPlaying);
-        if (p && loadedKey === key) {
+        if (mine && erroredKey !== key) {
           try {
             // Our own seek: inside the echo window so it isn't re-reported.
             markDriven(playing ? "playing" : "paused");
-            p.seekTo(t, true);
-            noteTime(t, playing);
+            mine.seek(t);
+            noteDrivenSeek(t, playing);
           } catch {
             /* noop */
           }
@@ -900,6 +997,7 @@ export function useSyncedPlayer({
     destroy,
     sync,
     duration,
+    error,
     getVideoTime,
     seekTo,
   };

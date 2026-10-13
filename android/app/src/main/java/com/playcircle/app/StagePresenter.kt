@@ -196,15 +196,19 @@ class StagePresenter(
         )
         val egl = EglBase.create().also { this.egl = it }
         // The "microphone" WebRTC records is replaced by the app sound in
-        // AppAudioCapture's hook — so no hardware voice processing on it.
+        // AppAudioCapture's hook, or mixed with it when "my voice" is on.
+        // Then the mic hears the speaker too — the shared app, callers —
+        // and that would go out a second time as an echo, so the phone's
+        // own echo canceller and noise suppressor run on the mic. (The app
+        // sound itself comes from playback capture, untouched by either.)
         val sound = if (withSound && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             AppAudioCaptureHook()
         } else {
             null
         }
         val adm = JavaAudioDeviceModule.builder(context)
-            .setUseHardwareAcousticEchoCanceler(false)
-            .setUseHardwareNoiseSuppressor(false)
+            .setUseHardwareAcousticEchoCanceler(true)
+            .setUseHardwareNoiseSuppressor(true)
             .apply { if (sound != null) setAudioBufferCallback(sound) }
             .createAudioDeviceModule()
             .also { this.adm = it }

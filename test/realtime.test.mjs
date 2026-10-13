@@ -1811,8 +1811,12 @@ describe("realtime", () => {
     });
 
     test("per room: many addresses' worth of guesses still run out", async () => {
-      // Lift the per-address cap so only the room's own limit (20/min) bites.
-      await withServer({ passwordPerAddress: [1_000, 60_000] }, async (own) => {
+      // Lift the per-address cap so only the room's own limit (20) bites.
+      // A long window, so a slow machine (20 scrypt checks) can't see a
+      // token refill before the 21st guess.
+      await withServer(
+        { passwordPerAddress: [1_000, 60_000], passwordPerRoom: [20, 3_600_000] },
+        async (own) => {
         const { code } = await passwordRoom(own, "correct horse");
         const other = await passwordRoom(own, "open sesame");
         for (let i = 0; i < 20; i++) {
@@ -1832,7 +1836,8 @@ describe("realtime", () => {
           password: "open sesame",
         });
         assert.equal(ok.kind, "state");
-      });
+        }
+      );
     });
 
     test("the async check admits the right password, refuses a wrong one, never blocks", async () => {
@@ -2257,6 +2262,831 @@ describe("persistence", () => {
       assert.equal(m2.cid, undefined);
     } finally {
       await srv2.stop();
+    }
+  });
+});
+
+/* ---------------- paste any link ---------------- */
+
+const { resolve: resolveLink, readPage, ERR: LINK_ERR } = require("../server/resolve.js");
+const { safeFetch, isBlockedAddress, FetchError } = require("../server/safeFetch.js");
+const mediaLib = require("../server/media.js");
+
+// A local "internet": pages, files and APIs the resolver is pointed at.
+async function startFixture() {
+  const hits = new Map();
+  const open = new Set();
+  let base = "";
+  const html = (res, body) => {
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.end(`<!doctype html><html><head>${body}</head><body></body></html>`);
+  };
+  const json = (res, data) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(data));
+  };
+  const server = http.createServer((req, res) => {
+    const p = req.url;
+    hits.set(p, (hits.get(p) || 0) + 1);
+    if (p === "/og") {
+      return html(
+        res,
+        `<title>Ignored</title>
+         <meta property="og:title" content="Tom &amp; Jerry &#8212; ep 1">
+         <meta property='og:image' content="/img/poster.jpg">
+         <meta property="og:video" content="/v/movie.mp4?a=1&amp;b=2">`
+      );
+    }
+    if (p === "/og2") return html(res, `<meta property="og:video:url" content="${base}/v/movie.mp4?a=1&b=2">`);
+    if (p === "/og-noext") return html(res, `<meta property="og:video" content="/stream">`);
+    if (p === "/stream") {
+      res.setHeader("content-type", "video/mp4");
+      return res.end(req.method === "HEAD" ? undefined : "not really a video");
+    }
+    if (p === "/live") {
+      res.setHeader("content-type", "application/vnd.apple.mpegurl");
+      return res.end("#EXTM3U\n");
+    }
+    if (p === "/ld") {
+      return html(
+        res,
+        `<script type="application/ld+json">{"@context":"https://schema.org","@graph":[
+           {"@type":"WebPage","name":"page"},
+           {"@type":"VideoObject","name":"From JSON-LD","thumbnailUrl":["/t.jpg"],"contentUrl":"/files/clip.webm"}]}</script>`
+      );
+    }
+    if (p === "/tag") {
+      return html(
+        res,
+        `<!-- <video src="/commented-out.mp4"></video> -->
+         <video controls poster="/p.jpg"><source src="/media/talk.m3u8" type="application/x-mpegURL"></video>`
+      );
+    }
+    if (p === "/oe-vimeo") {
+      return html(res, `<link rel="alternate" type="application/json+oembed" href="/oembed/vimeo.json" title="x">`);
+    }
+    if (p === "/oembed/vimeo.json") {
+      return json(res, {
+        type: "video",
+        title: "A Vimeo thing",
+        html: '<iframe src="https://player.vimeo.com/video/76979871?h=8272103f6e&amp;badge=0" width="640"></iframe>',
+      });
+    }
+    if (p === "/oe-yt") {
+      return html(res, `<link type="application/json+oembed" rel="alternate" href="${base}/oembed/yt.json">`);
+    }
+    if (p === "/oembed/yt.json") {
+      return json(res, { html: `<iframe src="https://www.youtube.com/embed/${V2}?feature=oembed"></iframe>` });
+    }
+    if (p === "/iframe") return html(res, `<iframe data-src="https://www.dailymotion.com/embed/video/x8abc12"></iframe>`);
+    if (p === "/clip-page") return html(res, `<iframe src="https://clips.twitch.tv/embed?clip=FunnyClip&parent=x"></iframe>`);
+    if (p === "/none") return html(res, `<title>Just words</title><video></video>`);
+    if (p === "/w/abcdefgh1234") return html(res, "<title>PeerTube</title>");
+    if (p === "/api/v1/videos/abcdefgh1234") {
+      return json(res, {
+        uuid: "u-1",
+        name: "Peer video",
+        duration: 95,
+        thumbnailPath: "/static/thumb.jpg",
+        account: { displayName: "Alice" },
+        streamingPlaylists: [{ type: 1, playlistUrl: `${base}/hls/master.m3u8` }],
+        files: [],
+      });
+    }
+    if (p === "/streamable-api/videos/abc123") {
+      return json(res, {
+        title: "Streamed",
+        thumbnail_url: "//cdn.example.com/t.jpg",
+        files: { mp4: { url: "//cdn.example.com/abc123.mp4", duration: 12.5 } },
+      });
+    }
+    if (p === "/big") {
+      res.setHeader("content-type", "text/html");
+      const chunk = "x".repeat(64 * 1024);
+      for (let i = 0; i < 48; i++) res.write(chunk); // 3 MB
+      return res.end();
+    }
+    if (p === "/slow") return; // never answers
+    // A video whose HEAD is slow and says nothing, and whose GET never ends.
+    if (p === "/og-hang") return html(res, `<meta property="og:video" content="/hang-probe">`);
+    if (p === "/hang-probe") {
+      if (req.method === "HEAD") setTimeout(() => res.end(), 1_200);
+      return;
+    }
+    // A page that takes a moment to share its video.
+    if (p === "/delay-og") {
+      setTimeout(() => html(res, `<meta property="og:video" content="/v/late.mp4">`), 600);
+      return;
+    }
+    if (p === "/og-private") return html(res, `<meta property="og:video" content="http://10.0.0.7/a.mp4">`);
+    if (p.startsWith("/redir/")) {
+      const n = Number(p.split("/")[2]);
+      res.statusCode = 302;
+      res.setHeader("location", n > 0 ? `/redir/${n - 1}` : "/og");
+      return res.end();
+    }
+    if (p === "/to-metadata") {
+      res.statusCode = 302;
+      res.setHeader("location", "http://169.254.169.254/latest/meta-data/");
+      return res.end();
+    }
+    if (p === "/to-internal") {
+      res.statusCode = 301;
+      res.setHeader("location", `http://internal.test:${server.address().port}/og`);
+      return res.end();
+    }
+    if (p === "/to-ftp") {
+      res.statusCode = 302;
+      res.setHeader("location", "ftp://example.com/x.mp4");
+      return res.end();
+    }
+    res.statusCode = 404;
+    res.end("nope");
+  });
+  server.on("connection", (s) => {
+    open.add(s);
+    s.on("close", () => open.delete(s));
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  base = `http://127.0.0.1:${port}`;
+  return {
+    base,
+    port,
+    hits: (p) => hits.get(p) || 0,
+    totalHits: () => [...hits.values()].reduce((a, b) => a + b, 0),
+    close: () =>
+      new Promise((r) => {
+        for (const s of open) s.destroy();
+        server.close(() => r());
+      }),
+  };
+}
+
+// Fixtures live on 127.0.0.1, so the resolver is told private is fine.
+const LOCAL = { allowPrivate: true, cache: false };
+
+describe("link resolution", () => {
+  let fx;
+  before(async () => {
+    fx = await startFixture();
+  });
+  after(() => fx.close());
+
+  test("direct .mp4 / .m3u8 links resolve by extension, without fetching", async () => {
+    const before = fx.totalHits();
+    const f = await resolveLink(`${fx.base}/videos/Big_Buck_Bunny.mp4`, LOCAL);
+    assert.deepEqual(f, {
+      kind: "file",
+      url: `${fx.base}/videos/Big_Buck_Bunny.mp4`,
+      mime: "video/mp4",
+      title: "Big_Buck_Bunny",
+      source: `${fx.base}/videos/Big_Buck_Bunny.mp4`,
+    });
+    const h = await resolveLink(`${fx.base}/hls/index.m3u8?token=1`, LOCAL);
+    assert.equal(h.kind, "hls");
+    assert.equal(h.url, `${fx.base}/hls/index.m3u8?token=1`);
+    assert.equal(h.title, "127.0.0.1"); // a generic name falls back to the host
+    assert.equal(mediaLib.key(h), `hls:${fx.base}/hls/index.m3u8?token=1`);
+    assert.equal(fx.totalHits(), before, "nothing fetched");
+  });
+
+  test("an extensionless link is identified by its Content-Type", async () => {
+    const f = await resolveLink(`${fx.base}/stream`, LOCAL);
+    assert.equal(f.kind, "file");
+    assert.equal(f.url, `${fx.base}/stream`);
+    assert.equal(f.mime, "video/mp4");
+    const h = await resolveLink(`${fx.base}/live`, LOCAL);
+    assert.equal(h.kind, "hls");
+    // A page's og:video without an extension is probed the same way.
+    const o = await resolveLink(`${fx.base}/og-noext`, LOCAL);
+    assert.equal(o.kind, "file");
+    assert.equal(o.url, `${fx.base}/stream`);
+    assert.equal(o.source, `${fx.base}/og-noext`);
+  });
+
+  test("og:video page: relative URL resolved, entities decoded, title and image kept", async () => {
+    const m = await resolveLink(`${fx.base}/og`, LOCAL);
+    assert.deepEqual(m, {
+      kind: "file",
+      url: `${fx.base}/v/movie.mp4?a=1&b=2`,
+      mime: "video/mp4",
+      title: "Tom & Jerry — ep 1",
+      thumb: `${fx.base}/img/poster.jpg`,
+      source: `${fx.base}/og`,
+    });
+  });
+
+  test("JSON-LD VideoObject contentUrl", async () => {
+    const m = await resolveLink(`${fx.base}/ld`, LOCAL);
+    assert.equal(m.kind, "file");
+    assert.equal(m.url, `${fx.base}/files/clip.webm`);
+    assert.equal(m.mime, "video/webm");
+    assert.equal(m.title, "From JSON-LD");
+    assert.equal(m.thumb, `${fx.base}/t.jpg`);
+  });
+
+  test("<video><source> page (comments ignored)", async () => {
+    const m = await resolveLink(`${fx.base}/tag`, LOCAL);
+    assert.equal(m.kind, "hls");
+    assert.equal(m.url, `${fx.base}/media/talk.m3u8`);
+    assert.equal(m.thumb, `${fx.base}/p.jpg`);
+    assert.equal(fx.hits("/commented-out.mp4"), 0);
+  });
+
+  test("oEmbed discovery → the Vimeo / YouTube player it describes", async () => {
+    const v = await resolveLink(`${fx.base}/oe-vimeo`, LOCAL);
+    assert.equal(v.kind, "vimeo");
+    assert.equal(v.id, "76979871");
+    assert.equal(v.hash, "8272103f6e");
+    assert.equal(v.source, `${fx.base}/oe-vimeo`);
+    const y = await resolveLink(`${fx.base}/oe-yt`, LOCAL);
+    assert.equal(y.kind, "youtube");
+    assert.equal(y.id, V2);
+    // A provider's iframe right in the page works too.
+    const d = await resolveLink(`${fx.base}/iframe`, LOCAL);
+    assert.equal(d.kind, "dailymotion");
+    assert.equal(d.id, "x8abc12");
+  });
+
+  test("PeerTube and Streamable go through their APIs", async () => {
+    const p = await resolveLink(`${fx.base}/w/abcdefgh1234`, LOCAL);
+    assert.equal(p.kind, "hls");
+    assert.equal(p.url, `${fx.base}/hls/master.m3u8`);
+    assert.equal(p.title, "Peer video");
+    assert.equal(p.author, "Alice");
+    assert.equal(p.duration, 95);
+    assert.equal(p.thumb, `${fx.base}/static/thumb.jpg`);
+
+    const s = await resolveLink("https://streamable.com/abc123", {
+      ...LOCAL,
+      apiBase: { streamable: `${fx.base}/streamable-api` },
+    });
+    assert.equal(s.kind, "file");
+    assert.equal(s.url, "https://cdn.example.com/abc123.mp4");
+    assert.equal(s.title, "Streamed");
+    assert.equal(s.duration, 12.5);
+  });
+
+  test("a page that shares nothing, a Twitch clip, copy-protected services", async () => {
+    assert.deepEqual(await resolveLink(`${fx.base}/none`, LOCAL), { error: LINK_ERR.notFound });
+    assert.match(LINK_ERR.notFound, /doesn't share it/);
+    assert.deepEqual(await resolveLink(`${fx.base}/clip-page`, LOCAL), { error: LINK_ERR.twitchClip });
+    assert.deepEqual(await resolveLink("https://clips.twitch.tv/FunnyClip"), { error: LINK_ERR.twitchClip });
+    assert.deepEqual(await resolveLink("https://www.twitch.tv/somebody/clip/FunnyClip-abc"), {
+      error: LINK_ERR.twitchClip,
+    });
+    for (const [url, name] of [
+      ["https://www.netflix.com/watch/80100172", "Netflix"],
+      ["https://www.primevideo.com/detail/0ABC", "Prime Video"],
+      ["https://www.amazon.co.uk/gp/video/detail/B0X", "Prime Video"],
+      ["https://www.disneyplus.com/video/123", "Disney+"],
+      ["https://www.hotstar.com/in/movies/x/123", "Hotstar"],
+      ["https://www.crunchyroll.com/watch/G4", "Crunchyroll"],
+      ["https://play.max.com/video/watch/1", "Max"],
+      ["https://www.hulu.com/watch/1", "Hulu"],
+      ["https://tv.apple.com/us/episode/x", "Apple TV"],
+    ]) {
+      const r = await resolveLink(url);
+      assert.equal(r.error, `${name} is copy-protected and can't be played here — each person needs to watch it on their own account.`);
+    }
+    // A regular Amazon product page isn't Prime Video (and isn't fetched here).
+    assert.equal(LINK_ERR.protected("X").startsWith("X is copy-protected"), true);
+  });
+
+  test("readPage stays linear on hostile markup (no ReDoS)", () => {
+    // Best of 3, so a busy machine's hiccup isn't mistaken for a regression
+    // (the old regex scanner took 10–47 s on the first two).
+    const timed = (html) => {
+      let best = Infinity;
+      for (let r = 0; r < 3; r++) {
+        const t0 = process.hrtime.bigint();
+        readPage(html);
+        best = Math.min(best, Number(process.hrtime.bigint() - t0) / 1e6);
+      }
+      return best;
+    };
+    const cases = [
+      ["300 KB of unclosed <meta", "<meta ".repeat(50_000), 100],
+      ["2 MB of unclosed <meta", "<meta ".repeat(350_000), 400],
+      ["2000 <video> and one </video>", `${"<video>".repeat(2000)}</video>`, 100],
+      ["2000 <video></video>", "<video></video>".repeat(2000), 100],
+      ["unclosed quotes", "<meta content='".repeat(20_000), 100],
+      ["ld+json scripts", '<script type="application/ld+json">{}</script>'.repeat(5_000), 100],
+    ];
+    for (const [name, html, ms] of cases) {
+      const took = timed(html);
+      assert.ok(took <= ms, `${name}: ${took.toFixed(1)} ms`);
+    }
+    // …and it still reads real markup right.
+    const p = readPage(
+      `<title>Hi &amp; there</title><metadata content="no"><meta name=x content=it's>
+       <meta property="og:title" content="a>b"><meta content = 'c>d' name="q">
+       <video src=x.mp4><source src="/s1.m3u8"></video>
+       <video><source src="s2.mp4"><source src="s3.webm"></video><source src="orphan.mp4">`
+    );
+    assert.equal(p.title, "Hi & there");
+    assert.deepEqual([...p.meta], [["x", ["it"]], ["og:title", ["a>b"]], ["q", ["c>d"]]]);
+    assert.deepEqual(
+      p.videos.map((v) => [v.src, v.sources.map((x) => x.src)]),
+      [["x.mp4", ["/s1.m3u8"]], [null, ["s2.mp4", "s3.webm"]]]
+    );
+  });
+
+  test("a probe's fallback GET gets only what's left of the deadline", async () => {
+    const t0 = Date.now();
+    const r = await resolveLink(`${fx.base}/og-hang`, { ...LOCAL, budgetMs: 1_500 });
+    assert.equal(r.error, LINK_ERR.notFound);
+    // HEAD answers (uselessly) at 1.2 s; the GET used to get a fresh 1.5 s.
+    assert.ok(Date.now() - t0 < 2_200, `took ${Date.now() - t0} ms`);
+  });
+
+  test("file / HLS links on private or intranet hosts are refused", async () => {
+    for (const url of [
+      "http://192.168.1.5/a.mp4",
+      "http://10.0.0.1/live.m3u8",
+      "http://169.254.169.254/x.m3u8",
+      "http://[::1]/a.mp4",
+      "http://2130706433/a.mp4",
+      "http://localhost:8080/a.mp4",
+      "http://foo.localhost/a.webm",
+      "http://intranet/a.mp4",
+    ]) {
+      assert.deepEqual(await resolveLink(url, { cache: false }), { error: LINK_ERR.blocked }, url);
+    }
+    assert.equal((await resolveLink("https://cdn.example.com/a.mp4", { cache: false })).kind, "file");
+  });
+
+  test("Vimeo / Dailymotion / Twitch / YouTube by URL shape, no network", async () => {
+    const cases = [
+      ["https://vimeo.com/76979871", { kind: "vimeo", id: "76979871" }],
+      ["vimeo.com/123456/abcdef1234", { kind: "vimeo", id: "123456", hash: "abcdef1234" }],
+      ["https://player.vimeo.com/video/123?h=deadbeef12", { kind: "vimeo", id: "123", hash: "deadbeef12" }],
+      ["https://vimeo.com/channels/staffpicks/987654", { kind: "vimeo", id: "987654" }],
+      ["https://www.dailymotion.com/video/x8abc12", { kind: "dailymotion", id: "x8abc12" }],
+      ["https://dai.ly/x7tgad0", { kind: "dailymotion", id: "x7tgad0" }],
+      ["https://geo.dailymotion.com/player.html?video=x8zzz99", { kind: "dailymotion", id: "x8zzz99" }],
+      ["https://www.twitch.tv/videos/2233445566", { kind: "twitch", type: "video", id: "2233445566" }],
+      ["https://twitch.tv/SomeStreamer", { kind: "twitch", type: "channel", id: "somestreamer" }],
+      ["https://player.twitch.tv/?video=v123&parent=x", { kind: "twitch", type: "video", id: "123" }],
+    ];
+    for (const [input, want] of cases) {
+      const got = await resolveLink(input, { cache: false });
+      for (const [k, v] of Object.entries(want)) assert.equal(got[k], v, `${input}: ${k}`);
+      assert.ok(got.source, `${input}: source`);
+      assert.deepEqual(mediaLib.fromClient(got) && mediaLib.key(mediaLib.fromClient(got)), mediaLib.key(got));
+    }
+    assert.deepEqual(await resolveLink(V0), { kind: "youtube", id: V0 });
+    assert.deepEqual(await resolveLink(`https://youtu.be/${V1}`), { kind: "youtube", id: V1 });
+    assert.equal((await resolveLink("just some words")).error, LINK_ERR.notLink);
+    assert.equal((await resolveLink("javascript:alert(1)")).error, LINK_ERR.notLink);
+    assert.equal((await resolveLink("x".repeat(2001))).error, LINK_ERR.notLink);
+  });
+});
+
+describe("SSRF-safe fetch", () => {
+  let fx;
+  before(async () => {
+    fx = await startFixture();
+  });
+  after(() => fx.close());
+
+  // Pretend these names are on the internet: public.test is our fixture
+  // (127.0.0.1, allowed only for this check), internal.test is a private box.
+  const DNS = {
+    allowAnyPort: true,
+    lookup: async (host) => {
+      if (host === "public.test") return [{ address: "127.0.0.1", family: 4 }];
+      if (host === "internal.test") return [{ address: "10.0.0.5", family: 4 }];
+      if (host === "mixed.test") {
+        return [
+          { address: "93.184.216.34", family: 4 },
+          { address: "192.168.1.1", family: 4 },
+        ];
+      }
+      throw Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" });
+    },
+    isBlocked: (ip) => ip !== "127.0.0.1" && isBlockedAddress(ip),
+  };
+
+  test("the address classifier", () => {
+    const blocked = [
+      "127.0.0.1", "127.255.255.254", "10.0.0.1", "10.255.1.1", "172.16.0.1", "172.31.255.255",
+      "192.168.0.1", "169.254.169.254", "100.64.0.1", "100.127.255.255", "0.0.0.0", "0.1.2.3",
+      "224.0.0.1", "239.255.255.250", "240.0.0.1", "255.255.255.255", "192.0.2.1", "198.18.0.1",
+      "::", "::1", "[::1]", "::ffff:127.0.0.1", "::ffff:7f00:1", "::ffff:10.0.0.1", "::ffff:169.254.169.254",
+      "::127.0.0.1", "64:ff9b::10.0.0.1", "2002:a00:1::1", "2002:7f00:1::", "fe80::1", "fe80::1%en0",
+      "fc00::1", "fd12:3456::1", "fec0::1", "ff02::1", "100::1", "2001:db8::1", "2001::1",
+      "not-an-ip", "",
+    ];
+    for (const ip of blocked) assert.equal(isBlockedAddress(ip), true, ip);
+    const ok = ["8.8.8.8", "1.1.1.1", "93.184.216.34", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8", "2a00:1450:4009::200e"];
+    for (const ip of ok) assert.equal(isBlockedAddress(ip), false, ip);
+  });
+
+  test("private, loopback and metadata addresses are refused (before connecting)", async () => {
+    for (const url of [
+      `${fx.base}/og`,
+      "http://10.0.0.1/",
+      "http://169.254.169.254/latest/meta-data/",
+      "http://[::1]/",
+      "http://[::ffff:127.0.0.1]/",
+      "http://2130706433/", // 127.0.0.1 as a number
+      "http://0x7f.1/",
+      "http://localhost/",
+    ]) {
+      await assert.rejects(safeFetch(url), (e) => e instanceof FetchError && e.code === "blocked", url);
+    }
+    assert.equal(fx.hits("/og"), 0);
+    // …and the resolver says so in words.
+    assert.deepEqual(await resolveLink(`${fx.base}/og`, { cache: false }), { error: LINK_ERR.blocked });
+    assert.deepEqual(await resolveLink("http://169.254.169.254/latest/meta-data/", { cache: false }), {
+      error: LINK_ERR.blocked,
+    });
+  });
+
+  test("a public page whose video file is on a private host is refused", async () => {
+    const r = await resolveLink(`http://public.test:${fx.port}/og-private`, { ...DNS, cache: false });
+    assert.deepEqual(r, { error: LINK_ERR.blocked });
+  });
+
+  test("a name resolving to a private address (even one of several) is refused", async () => {
+    await assert.rejects(safeFetch("http://internal.test/", DNS), (e) => e.code === "blocked");
+    await assert.rejects(safeFetch("http://mixed.test/", DNS), (e) => e.code === "blocked");
+  });
+
+  test("odd ports and schemes are refused", async () => {
+    await assert.rejects(safeFetch("http://public.test:22/", { ...DNS, allowAnyPort: false }), (e) => e.code === "blocked");
+    await assert.rejects(safeFetch("ftp://public.test/"), (e) => e.code === "blocked");
+    await assert.rejects(safeFetch("file:///etc/passwd"), (e) => e.code === "blocked");
+  });
+
+  test("redirects are followed by hand and every hop is re-checked", async () => {
+    const pub = `http://public.test:${fx.port}`;
+    let lookups = 0;
+    const counted = { ...DNS, lookup: (h) => (lookups++, DNS.lookup(h)) };
+    const ok = await safeFetch(`${pub}/redir/2`, counted);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.url, `${pub}/og`);
+    assert.match(ok.text(), /og:video/);
+    // One DNS answer per hop, and the connection used that answer (pinned).
+    assert.equal(lookups, 4);
+
+    await assert.rejects(safeFetch(`${pub}/to-metadata`, DNS), (e) => e.code === "blocked");
+    await assert.rejects(safeFetch(`${pub}/to-internal`, DNS), (e) => e.code === "blocked");
+    await assert.rejects(safeFetch(`${pub}/to-ftp`, DNS), (e) => e.code === "blocked");
+    assert.equal(fx.hits("/og"), 1, "the private hop was never made");
+    await assert.rejects(safeFetch(`${pub}/redir/5`, DNS), (e) => e.code === "network" && /redirects/.test(e.message));
+    // Through the resolver: a public page bouncing inward is refused.
+    assert.deepEqual(await resolveLink(`${pub}/to-internal`, { ...DNS, cache: false }), {
+      error: LINK_ERR.blocked,
+    });
+  });
+
+  test("the pinned lookup: a rebinding DNS can't swap the address mid-request", async () => {
+    let calls = 0;
+    const rebinding = {
+      ...DNS,
+      // First answer is fine; any later one would point inside.
+      lookup: async () => (++calls === 1 ? [{ address: "127.0.0.1", family: 4 }] : [{ address: "10.0.0.5", family: 4 }]),
+    };
+    const res = await safeFetch(`http://public.test:${fx.port}/og`, rebinding);
+    assert.equal(res.status, 200);
+    assert.equal(calls, 1);
+  });
+
+  test("bodies are capped and slow sites time out", async () => {
+    const big = await safeFetch(`${fx.base}/big`, { allowPrivate: true });
+    assert.equal(big.truncated, true);
+    assert.equal(Buffer.byteLength(big.text()), 2 * 1024 * 1024);
+    const small = await safeFetch(`${fx.base}/big`, { allowPrivate: true, maxBytes: 1000 });
+    assert.equal(small.text().length, 1000);
+    assert.throws(() => small.json(), (e) => e.code === "network");
+
+    const t0 = Date.now();
+    await assert.rejects(
+      safeFetch(`${fx.base}/slow`, { allowPrivate: true, timeoutMs: 300 }),
+      (e) => e.code === "network" && /timeout/.test(e.message)
+    );
+    assert.ok(Date.now() - t0 < 1500);
+    assert.deepEqual(await resolveLink(`${fx.base}/slow`, { ...LOCAL, timeoutMs: 300 }), {
+      error: LINK_ERR.unreachable,
+    });
+    assert.deepEqual(await resolveLink("http://nowhere.test/", { ...DNS, cache: false }), {
+      error: LINK_ERR.unreachable,
+    });
+  });
+});
+
+describe("media validation", () => {
+  test("fromClient accepts every video kind and rejects junk for each", () => {
+    const good = [
+      [{ kind: "youtube", id: V0, title: "spoof" }, { kind: "youtube", id: V0 }, `yt:${V0}`],
+      [{ kind: "file", url: "https://e.com/a.mp4", mime: "video/MP4", extra: 1 }, { kind: "file", url: "https://e.com/a.mp4", mime: "video/mp4" }, "file:https://e.com/a.mp4"],
+      [{ kind: "file", url: "https://e.com/a", mime: "text/html" }, { kind: "file", url: "https://e.com/a" }, "file:https://e.com/a"],
+      [{ kind: "hls", url: "http://e.com/x.m3u8" }, { kind: "hls", url: "http://e.com/x.m3u8" }, "hls:http://e.com/x.m3u8"],
+      [{ kind: "vimeo", id: "123", hash: "abcdef12" }, { kind: "vimeo", id: "123", hash: "abcdef12" }, "vimeo:123"],
+      [{ kind: "vimeo", id: "123", hash: null }, { kind: "vimeo", id: "123" }, "vimeo:123"],
+      [{ kind: "dailymotion", id: "x8abc12" }, { kind: "dailymotion", id: "x8abc12" }, "dm:x8abc12"],
+      [{ kind: "twitch", type: "video", id: "99" }, { kind: "twitch", type: "video", id: "99" }, "twitch:video:99"],
+      [{ kind: "twitch", type: "channel", id: "Some_One" }, { kind: "twitch", type: "channel", id: "some_one" }, "twitch:channel:some_one"],
+    ];
+    for (const [input, want, k] of good) {
+      const got = mediaLib.fromClient(input);
+      assert.deepEqual(got, want, JSON.stringify(input));
+      assert.equal(mediaLib.key(got), k);
+      assert.equal(mediaLib.isTimed(got), true);
+    }
+    const bad = [
+      null, "x", [], {}, { kind: "live", streamId: "s" }, { kind: "nope", id: "1" },
+      { kind: "youtube", id: "short" }, { kind: "youtube", id: ["dQw4w9WgXcQ"] },
+      { kind: "file" }, { kind: "file", url: "javascript:alert(1)" }, { kind: "file", url: "/relative.mp4" },
+      { kind: "file", url: "data:video/mp4;base64,AAAA" }, { kind: "file", url: `https://e.com/${"a".repeat(2000)}.mp4` },
+      { kind: "file", url: "https://user:pw@e.com/a.mp4" }, { kind: "file", url: 5 },
+      { kind: "hls", url: "ftp://e.com/x.m3u8" }, { kind: "hls", url: {} },
+      { kind: "vimeo", id: 5 }, { kind: "vimeo", id: "12a" }, { kind: "vimeo", id: "1", hash: "<script>" },
+      { kind: "dailymotion", id: "x" }, { kind: "dailymotion", id: "../../etc" },
+      { kind: "twitch", id: "99" }, { kind: "twitch", type: "clip", id: "x" },
+      { kind: "twitch", type: "video", id: "abc" }, { kind: "twitch", type: "channel", id: "a b" },
+    ];
+    for (const b of bad) assert.equal(mediaLib.fromClient(b), null, JSON.stringify(b));
+    // A file / HLS link every viewer would fetch must be on a public host.
+    for (const url of ["http://192.168.0.2/a.mp4", "http://127.0.0.1:3000/a.mp4", "http://[fe80::1]/a.mp4", "http://localhost/a.mp4", "http://nas/a.mp4"]) {
+      assert.equal(mediaLib.fromClient({ kind: "file", url }), null, url);
+      assert.equal(mediaLib.fromClient({ kind: "hls", url }), null, url);
+      assert.equal(mediaLib.refusal({ kind: "file", url }), "That link can't be opened", url);
+      assert.deepEqual(mediaLib.fromClient({ kind: "file", url }, { allowPrivate: true }), { kind: "file", url });
+    }
+    assert.equal(mediaLib.refusal({ kind: "file", url: "https://e.com/a.mp4" }), null);
+    assert.equal(mediaLib.isTimed({ kind: "live", streamId: "s" }), false);
+    assert.equal(mediaLib.isTimed(null), false);
+  });
+
+  test("infoFrom keeps only clean display fields", () => {
+    assert.deepEqual(
+      mediaLib.infoFrom({
+        title: `  ${"t".repeat(300)}\u0000 `,
+        author: 7,
+        thumb: "javascript:x",
+        duration: 1e9,
+        source: "https://e.com/page",
+        evil: true,
+      }),
+      { title: "t".repeat(120), source: "https://e.com/page" }
+    );
+  });
+});
+
+describe("links over sockets", () => {
+  let fx;
+  let srv;
+  before(async () => {
+    fx = await startFixture();
+    srv = await startServer({ resolveOptions: { ...LOCAL, timeoutMs: 1_500 } });
+  });
+  afterEach(() => srv.disconnectAll());
+  after(async () => {
+    await srv.stop();
+    await fx.close();
+  });
+
+  async function pair() {
+    const code = roomCode();
+    const host = await srv.connect();
+    await join(host, { code, name: "Host", clientId: `h-${code}` });
+    const viewer = await srv.connect();
+    await join(viewer, { code, name: "Viewer", clientId: `v-${code}` });
+    return { code, host, viewer };
+  }
+
+  const loadAck = (sock, payload, timeout = 8000) =>
+    sock.timeout(timeout).emitWithAck("player:action", { type: "load", ...payload });
+
+  test("load by link: ack ok, everyone gets it, and it syncs like YouTube", async () => {
+    const { code, host, viewer } = await pair();
+    const url = `${fx.base}/stream`;
+    const seen = once(viewer, "player:action", (a) => a.type === "load" && a.media?.kind === "file", 8000);
+    const res = await loadAck(host, { input: `  ${url}  ` });
+    assert.deepEqual(res, { ok: true });
+    const a = await seen;
+    assert.equal(a.media.url, url);
+    assert.equal(a.media.mime, "video/mp4");
+    assert.equal(a.by, "Host");
+    const k = `file:${url}`;
+
+    // Ticks, play/pause/seek with the key, meta and ended all work.
+    const tick = once(viewer, "player:tick", (t) => t.key === k);
+    const seek = once(viewer, "player:action", (x) => x.type === "seek" && x.time === 20);
+    host.emit("player:action", { type: "seek", time: 20, key: k });
+    await seek;
+    await tick;
+    host.emit("player:meta", { key: k, duration: 300 });
+    await ping(host);
+    const room = srv.rt.rooms.get(code);
+    assert.equal(room.duration, 300);
+
+    // Something new: the file goes to history.
+    await loadAck(host, { input: "https://vimeo.com/123456" });
+    assert.equal(room.media.kind, "vimeo");
+    assert.equal(room.history[0].media.url, url);
+    // And can be loaded back by identity, keeping what the room knew.
+    assert.deepEqual(await loadAck(host, { media: { kind: "file", url, title: "spoofed" } }), { ok: true });
+    // ("stream" is a generic name, so the file was titled by its host.)
+    assert.equal(room.media.title, "127.0.0.1");
+    assert.equal(room.media.source, url);
+  });
+
+  test("failures come back on the ack with a human message", async () => {
+    const { host } = await pair();
+    assert.deepEqual(await loadAck(host, { input: `${fx.base}/none` }), { ok: false, error: LINK_ERR.notFound });
+    assert.deepEqual(await loadAck(host, { input: "https://www.netflix.com/watch/1" }), {
+      ok: false,
+      error: "Netflix is copy-protected and can't be played here — each person needs to watch it on their own account.",
+    });
+    assert.deepEqual(await loadAck(host, { input: "hello" }), { ok: false, error: LINK_ERR.notLink });
+    assert.equal((await loadAck(host, { media: { kind: "live", streamId: "x" } })).ok, false);
+  });
+
+  test("a viewer without video control is refused before anything is fetched", async () => {
+    const { host, viewer } = await pair();
+    const before = fx.hits("/og");
+    const snap = once(viewer, "player:action", (a) => a.denied === true);
+    const res = await loadAck(viewer, { input: `${fx.base}/og` });
+    assert.deepEqual(res, { ok: false, error: "Only the host can change the video" });
+    await snap;
+    assert.equal(fx.hits("/og"), before);
+    await ping(host);
+  });
+
+  test("losing the right while the link resolves means it never lands", async () => {
+    const { code, host, viewer } = await pair();
+    host.emit("host:perm", { targetId: viewer.id, perm: "video", value: true });
+    await ping(host);
+    const pending = loadAck(viewer, { input: `${fx.base}/slow` }, 10_000);
+    await sleep(100);
+    host.emit("host:perm", { targetId: viewer.id, perm: "video", value: false });
+    // The slow fetch times out on its own — wait for the ack.
+    const res = await pending;
+    assert.equal(res.ok, false);
+    assert.equal(srv.rt.rooms.get(code).media, null);
+  });
+
+  test("queue:add by link resolves the media; the same video by another link is a duplicate", async () => {
+    const { code, host } = await pair();
+    // Something on stage so the suggestion queues instead of playing.
+    await loadAck(host, { input: `https://www.youtube.com/watch?v=${V0}` });
+    const res = await host.timeout(8000).emitWithAck("queue:add", { input: `${fx.base}/og` });
+    assert.deepEqual(res, { ok: true, status: "ready" });
+    const room = srv.rt.rooms.get(code);
+    assert.equal(room.queue.length, 1);
+    assert.deepEqual(room.queue[0].media, {
+      kind: "file",
+      url: `${fx.base}/v/movie.mp4?a=1&b=2`,
+      mime: "video/mp4",
+      title: "Tom & Jerry — ep 1",
+      thumb: `${fx.base}/img/poster.jpg`,
+      source: `${fx.base}/og`,
+    });
+    const again = await host.timeout(8000).emitWithAck("queue:add", { input: `${fx.base}/og2` });
+    assert.equal(again.duplicate, true);
+    assert.equal(room.queue.length, 1);
+    const bad = await host.timeout(8000).emitWithAck("queue:add", { input: `${fx.base}/clip-page` });
+    assert.deepEqual(bad, { ok: false, error: LINK_ERR.twitchClip });
+    // Playing it from the queue syncs by its key.
+    const item = room.queue[0];
+    host.emit("queue:play", { id: item.id });
+    await ping(host);
+    assert.equal(mediaLib.key(room.media), `file:${fx.base}/v/movie.mp4?a=1&b=2`);
+    assert.equal(room.moments.key, mediaLib.key(room.media));
+  });
+
+  test("a link that resolves after someone else changed the video doesn't land", async () => {
+    const { code, host, viewer } = await pair();
+    host.emit("host:perm", { targetId: viewer.id, perm: "video", value: true });
+    await ping(host);
+    const pending = loadAck(host, { input: `${fx.base}/delay-og` });
+    await sleep(150);
+    assert.deepEqual(await loadAck(viewer, { media: { kind: "youtube", id: V1 } }), { ok: true });
+    assert.deepEqual(await pending, { ok: false, error: "The video changed while finding that link" });
+    assert.equal(srv.rt.rooms.get(code).media.id, V1);
+  });
+
+  test("a load always gets an ack: not in a room, rate limited", async () => {
+    const stray = await srv.connect();
+    assert.deepEqual(await loadAck(stray, { media: { kind: "youtube", id: V0 } }), {
+      ok: false,
+      error: "You're not in this room",
+    });
+    const { host } = await pair();
+    const acks = await Promise.all(
+      Array.from({ length: 13 }, () => loadAck(host, { media: { kind: "youtube", id: V0 } }))
+    );
+    assert.deepEqual(acks.at(-1), { ok: false, error: "Slow down a little" });
+  });
+
+  test("resolving is rate limited per socket", async () => {
+    const limited = await startServer({ resolveOptions: LOCAL, resolvePerSocket: [2, 60_000] });
+    try {
+      const host = await limited.connect();
+      await join(host, { code: roomCode(), name: "Host", clientId: "rl-host" });
+      const ask = (i) => host.timeout(8000).emitWithAck("player:action", { type: "load", input: `${fx.base}/v/${i}.mp4` });
+      assert.equal((await ask(1)).ok, true);
+      assert.equal((await ask(2)).ok, true);
+      assert.deepEqual(await ask(3), { ok: false, error: "Slow down a little" });
+      // YouTube links don't need resolving and aren't counted.
+      const yt1 = await host.timeout(2000).emitWithAck("player:action", { type: "load", input: V1 });
+      assert.equal(yt1.ok, true);
+    } finally {
+      await limited.stop();
+    }
+  });
+});
+
+describe("private-host files over sockets", () => {
+  test("load / queue:add of a file on a private host are refused", async () => {
+    const plain = await startServer();
+    try {
+      const host = await plain.connect();
+      await join(host, { code: roomCode(), name: "Host", clientId: "ph-host" });
+      const bad = { kind: "file", url: "http://192.168.0.10/a.mp4" };
+      const no = { ok: false, error: "That link can't be opened" };
+      assert.deepEqual(await host.timeout(4000).emitWithAck("player:action", { type: "load", media: bad }), no);
+      assert.deepEqual(await host.timeout(4000).emitWithAck("queue:add", { media: bad }), no);
+      const ok = await host
+        .timeout(4000)
+        .emitWithAck("player:action", { type: "load", media: { kind: "file", url: "https://cdn.example.com/a.mp4" } });
+      assert.deepEqual(ok, { ok: true });
+    } finally {
+      await plain.stop();
+    }
+  });
+});
+
+describe("persistence of every video kind", () => {
+  test("a vimeo on stage and a file in the queue survive a restart", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "playcircle-links-"));
+    const dataFile = path.join(dir, "rooms.json");
+    const fx = await startFixture();
+    const code = roomCode();
+    let a;
+    let b;
+    try {
+      a = await startServer({ dataFile, resolveOptions: LOCAL });
+      const owner = await a.connect();
+      await join(owner, { code, name: "Owner", clientId: "links-owner" });
+      const loaded = await owner
+        .timeout(8000)
+        .emitWithAck("player:action", { type: "load", input: "https://vimeo.com/123456/abcdef1234" });
+      assert.equal(loaded.ok, true);
+      owner.emit("player:action", { type: "pause", time: 42, key: "vimeo:123456" });
+      const queued = await owner.timeout(8000).emitWithAck("queue:add", { input: `${fx.base}/og` });
+      assert.equal(queued.ok, true);
+      await ping(owner);
+      a.rt.flush();
+      await a.stop();
+
+      // Tamper with the snapshot: junk media in history must not come back.
+      const saved = JSON.parse(fs.readFileSync(dataFile, "utf8"));
+      const r = saved.rooms.find((x) => x.code === code);
+      r.history = [
+        { media: { kind: "file", url: "javascript:alert(1)" }, playedAt: 1 },
+        { media: { kind: "twitch", type: "channel", id: "good_one", title: "Good" }, playedAt: 2 },
+      ];
+      r.queue[0].media.thumb = "javascript:bad";
+      fs.writeFileSync(dataFile, JSON.stringify(saved));
+
+      const origLog = console.log;
+      console.log = () => {};
+      try {
+        b = await startServer({ dataFile, resolveOptions: LOCAL });
+      } finally {
+        console.log = origLog;
+      }
+      const st = await join(await b.connect(), { code, name: "Owner", clientId: "links-owner" });
+      assert.deepEqual(st.media, {
+        kind: "vimeo",
+        id: "123456",
+        hash: "abcdef1234",
+        source: "https://vimeo.com/123456/abcdef1234",
+      });
+      assert.ok(Math.abs(st.time - 42) < 0.01);
+      assert.equal(st.queue.items.length, 1);
+      assert.deepEqual(st.queue.items[0].media, {
+        kind: "file",
+        url: `${fx.base}/v/movie.mp4?a=1&b=2`,
+        mime: "video/mp4",
+        title: "Tom & Jerry — ep 1",
+        source: `${fx.base}/og`,
+      });
+      assert.deepEqual(
+        st.queue.history.map((h) => h.media),
+        [{ kind: "twitch", type: "channel", id: "good_one", title: "Good" }]
+      );
+    } finally {
+      await a?.stop();
+      await b?.stop();
+      await fx.close();
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

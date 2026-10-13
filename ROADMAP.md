@@ -12,6 +12,7 @@ _Last updated: 2026-10-13_
 | 2026-10-13 | Build **Phase 1 (Reliability)** and **Phase 2 (Shared watch queue)** first. Everything else waits. |
 | 2026-10-13 | Skip anything that needs an outside service or paid key for now (see [On hold: needs outside services](#on-hold-needs-outside-services)). |
 | 2026-10-13 | Batch 2: **Phase 3 (Social)** + **Share anything** (tab, screen, local file). Video-URL sharing left out. |
+| 2026-10-13 | Batch 3: **paste any link**. The server resolves what was pasted; only openly shared video, no page JavaScript run, nothing protected bypassed. Dailymotion left as is (its player needs a partner Player ID). |
 | 2026-10-13 | Room state is saved to a local file (`.data/rooms.json`) so rooms survive a restart. No Redis. Turn it off with `PERSIST=0`. |
 | Earlier | Google sign-in deferred; people join with a display name only. |
 | Earlier | The room's creator keeps "first right": they always hold the crown and nobody can act on them. |
@@ -76,7 +77,8 @@ key would fix this (on hold, see below).
 - [x] Stream a local video file live (presenter controls pause/seek for everyone)
 - [x] Presenter quality cap (Auto/1080p/720p/480p) + each viewer's own quality
       choice; live stats; auto-retry; "Tap to unmute" when autoplay blocks sound
-- [ ] Paste a direct video URL (.mp4 / .m3u8) — not built (not requested)
+- [ ] Paste a direct video URL (.mp4 / .m3u8) — not built here; done in
+      Batch 3 below
 
 Decisions made while building:
 
@@ -110,11 +112,54 @@ Verified 2026-10-13: server test suite (`npm test`) plus a two-browser run —
 tab share start/view/stop, floating reactions + moments, clickable chat
 timestamps, pin, quick poll voting, password set / wrong / right.
 
+## Batch 3 — paste any link (2026-10-13, in progress / not yet committed)
+
+The link box (and Up next) accepts almost any link; the server works out the
+video. Everything plays synced with the queue, reactions, polls and moments.
+
+- [x] YouTube (as before)
+- [x] Vimeo
+- [x] Twitch past broadcasts (synced) and live channels (shown as *Live*)
+- [x] Paste a direct video URL: `.mp4` / `.m4v` / `.webm` / `.mov` / `.ogv`
+      files, and `.m3u8` HLS streams (via hls.js), synced like YouTube
+- [x] Streamable, Internet Archive and PeerTube through their public APIs
+- [x] Any other page that shares its video openly: Open Graph `og:video`,
+      Twitter player stream, schema.org `VideoObject`, `<video>`/`<source>`,
+      oEmbed, or an embedded YouTube / Vimeo / Twitch player
+- [x] Clear errors instead of broken players: pages that don't share their
+      video ("use Share → Browser tab instead"), copy-protected services
+      (Netflix, Prime Video, Disney+, Hotstar, Crunchyroll, Max, Hulu,
+      Apple TV), Twitch clips (no player API), sites that block other players
+      (e.g. TED's stream, some hosts without CORS), dead links
+- [x] Safe fetching: public internet addresses only (private, loopback,
+      link-local and metadata ranges blocked), DNS pinned against rebinding,
+      every redirect re-checked, 6 s / 2 MB limits, results cached 10 min,
+      rate-limited per connection and per address; file / HLS links on
+      private hosts refused so viewers' browsers aren't sent into their own
+      networks
+- [x] One `StagePlayer` interface (`components/room/players/`) with adapters
+      for YouTube, HTML5 video (files + HLS), Vimeo, Dailymotion and Twitch;
+      `useSyncedPlayer` drives any of them with the same drift correction,
+      echo handling and live detection
+- [x] Full-screen button on the player box (floating call bubbles stay
+      visible)
+- [x] Protocol: `player:action {type:"load", input}` and `queue:add {input}`
+      resolve on the server and ack `{ok}` / `{ok:false, error}`; media kinds
+      `youtube` / `file` / `hls` / `vimeo` / `dailymotion` / `twitch` / `live`
+- [ ] Dailymotion — left as is: its player shows "Forbidden" without a partner Player ID (see
+      [On hold](#on-hold-needs-outside-services))
+
+Limits that still apply: Twitch only plays on https pages (or `localhost`);
+a page whose video only appears by running its own JavaScript isn't found
+(use Share → Browser tab); copy-protected services stay out.
+
+Verified 2026-10-13 in a browser. `npm test` also covers link resolution, the
+safe fetcher (private / loopback / metadata addresses refused) and loading or
+queueing by link over sockets.
+
 ## Ideas not started
 
-- Paste a direct video URL (.mp4 / .m3u8, synced like YouTube)
 - Original-quality file sharing (upload once; needs storage)
-- Twitch / Vimeo (low priority: Twitch is mostly live; Vimeo often blocks embeds)
 
 ## On hold: needs outside services
 
@@ -129,6 +174,7 @@ and usually money.
 | TURN relay | Twilio, Cloudflare, Metered, or your own coturn | Already supported: set `NEXT_PUBLIC_ICE_SERVERS`. Without it, some strict networks can't connect calls. |
 | AI group recommendations | An AI API key + a YouTube Data API key | Build after the queue and voting exist. |
 | Queue video lengths | A YouTube Data API key | Without it, lengths appear only after a video has played. |
+| Dailymotion | A Dailymotion partner account and its registered **Player ID** | Links are recognised, but Dailymotion's player shows "Forbidden" without one. Left as is for now (decided 2026-10-13); use tab share. |
 
 ## Hosting notes
 
