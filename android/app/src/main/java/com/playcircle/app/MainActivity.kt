@@ -213,7 +213,12 @@ class MainActivity : ComponentActivity() {
             allowFileAccess = false
             allowContentAccess = true
             setSupportMultipleWindows(false)
-            userAgentString = "$userAgentString PlayCircleApp/${BuildConfig.VERSION_NAME}"
+            // Look like Chrome: YouTube refuses to play embeds ("An error
+            // occurred") for user agents marked as an Android WebView. The
+            // page spots the app by window.PlayCircleAndroid, not the UA.
+            userAgentString = userAgentString
+                .replace("; wv)", ")")
+                .replace(" Version/4.0", "")
         }
         // YouTube's embedded player needs its cookies.
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
