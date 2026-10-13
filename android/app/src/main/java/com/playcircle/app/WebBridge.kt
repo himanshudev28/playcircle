@@ -35,6 +35,12 @@ class WebBridge(private val activity: MainActivity) {
         activity.runOnUiThread { activity.setCallPip(on) }
     }
 
+    /** Your camera can flip: put a flip button on the PiP window. */
+    @JavascriptInterface
+    fun setPipFlip(on: Boolean) {
+        activity.runOnUiThread { activity.setPipFlip(on) }
+    }
+
     @JavascriptInterface
     fun getShareState(): String = ShareState.toJson(ShareState.current)
 

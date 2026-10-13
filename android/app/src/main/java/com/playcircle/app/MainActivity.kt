@@ -4,14 +4,20 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.PendingIntent
 import android.app.PictureInPictureParams
+import android.app.RemoteAction
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.drawable.Icon
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
@@ -63,6 +69,7 @@ class MainActivity : ComponentActivity() {
         const val INK = 0xFF060505.toInt()
         const val BONE = 0xFFF5F1EA.toInt()
         const val SMOKE = 0xFFA49B93.toInt()
+        const val ACTION_PIP_FLIP = "com.playcircle.app.PIP_FLIP"
 
         // Phone browsers' gaps, filled by the app: clipboard and share sheet.
         const val POLYFILL = """
@@ -101,6 +108,19 @@ class MainActivity : ComponentActivity() {
     /** We're opening another screen ourselves (link, picker, dialog): that's
         not the user leaving, so no PiP until we're back. */
     private var pipSuppressed = false
+    /** Your call camera is on and can flip: the PiP window gets a button. */
+    private var pipFlip = false
+
+    // The PiP window's flip button → the page flips the call camera.
+    private val pipActionReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != ACTION_PIP_FLIP) return
+            webView.evaluateJavascript(
+                "window.dispatchEvent(new CustomEvent('playcircle-pip-action',{detail:{action:'flip'}}))",
+                null
+            )
+        }
+    }
 
     private val onShareState: (ShareState.Snapshot, String?) -> Unit = { s, msg ->
         updatePipParams() // a share starting or ending re-evaluates PiP
@@ -186,6 +206,9 @@ class MainActivity : ComponentActivity() {
 
         setUpWebView()
         ShareState.listen(onShareState)
+        ContextCompat.registerReceiver(
+            this, pipActionReceiver, IntentFilter(ACTION_PIP_FLIP), ContextCompat.RECEIVER_NOT_EXPORTED
+        )
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -229,6 +252,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         ShareState.unlisten(onShareState)
+        unregisterReceiver(pipActionReceiver)
         webView.destroy()
         super.onDestroy()
     }
@@ -277,6 +301,7 @@ class MainActivity : ComponentActivity() {
             // the old page said about PiP no longer holds.
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
                 callPip = false
+                pipFlip = false
                 updatePipParams()
             }
 
@@ -453,6 +478,24 @@ class MainActivity : ComponentActivity() {
         camera window does show up in the share.) */
     private fun pipWanted() = callPip && !pipSuppressed
 
+    fun setPipFlip(on: Boolean) {
+        if (on && !isOurs(webView.url)) return
+        pipFlip = on
+        updatePipParams()
+    }
+
+    private fun flipAction() = RemoteAction(
+        Icon.createWithResource(this, R.drawable.ic_pip_flip),
+        "Flip camera",
+        "Switch between the front and back camera",
+        PendingIntent.getBroadcast(
+            this,
+            1,
+            Intent(ACTION_PIP_FLIP).setPackage(packageName),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+    )
+
     private fun suppressPip() {
         pipSuppressed = true
         updatePipParams()
@@ -465,6 +508,7 @@ class MainActivity : ComponentActivity() {
         PictureInPictureParams.Builder()
             // Portrait-ish: faces, not a movie frame.
             .setAspectRatio(Rational(3, 4))
+            .setActions(if (pipFlip) listOf(flipAction()) else emptyList())
             .apply {
                 // Android 12+: swipe home goes straight into PiP.
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {

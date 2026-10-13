@@ -13,7 +13,7 @@ import { useEffect, useSyncExternalStore } from "react";
    In a plain browser none of this exists; useAndroidPip() is then always
    false and setCallPip does nothing. */
 
-type PipBridge = { setCallPip?(on: boolean): void };
+type PipBridge = { setCallPip?(on: boolean): void; setPipFlip?(on: boolean): void };
 
 function bridge(): PipBridge | null {
   if (typeof window === "undefined") return null;
@@ -23,8 +23,14 @@ function bridge(): PipBridge | null {
 let inPip = false;
 const listeners = new Set<() => void>();
 const closeListeners = new Set<() => void>();
+const flipListeners = new Set<() => void>();
 
 if (typeof window !== "undefined") {
+  // A button on the PiP window was tapped.
+  window.addEventListener("playcircle-pip-action", (e) => {
+    const action = (e as CustomEvent<{ action?: string }>).detail?.action;
+    if (action === "flip") flipListeners.forEach((l) => l());
+  });
   window.addEventListener("playcircle-pip", (e) => {
     const detail = (e as CustomEvent<{ on?: boolean; closed?: boolean }>).detail;
     // Swiped away: Android has cut the camera, so the call shouldn't linger.
@@ -108,6 +114,23 @@ export function usePipPreference(): boolean {
 /** True inside the Android app (which has the pop-up at all). */
 export function isAndroidApp(): boolean {
   return !!bridge()?.setCallPip;
+}
+
+/** Shows a flip-camera button on the Android PiP window while `on`, and
+    runs `flip` when it's tapped. */
+export function usePipFlip(on: boolean, flip: () => void) {
+  useEffect(() => {
+    const b = bridge();
+    if (!b?.setPipFlip) return;
+    b.setPipFlip(on);
+    return () => b.setPipFlip?.(false);
+  }, [on]);
+  useEffect(() => {
+    flipListeners.add(flip);
+    return () => {
+      flipListeners.delete(flip);
+    };
+  }, [flip]);
 }
 
 /** Lets the Android app pop into picture-in-picture while `on` (in a call). */

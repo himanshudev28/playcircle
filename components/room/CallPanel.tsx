@@ -9,6 +9,7 @@ import {
   useAndroidPip,
   useAndroidPipClosed,
   useCallPip,
+  usePipFlip,
   usePipPreference,
 } from "@/lib/nativePip";
 import { CallFloat, CallPip, useFullscreenHost, useSystemPip } from "./CallFloat";
@@ -41,6 +42,7 @@ export function CallPanel({
   const androidPip = useAndroidPip();
   const pipPref = usePipPreference();
   useCallPip(call.inCall && pipPref);
+  usePipFlip(call.inCall && call.cam && call.canFlip, call.flipCam);
   useAndroidPipClosed(call.leave);
   // Lives here, not in the floating window: the pop-out must outlast it
   // (leaving full screen — which switching tabs does — unmounts the window).
