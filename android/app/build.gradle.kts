@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val defaultServer = (findProperty("playcircleServer") as String?) ?: "https://playcircle-174u.onrender.com"
+val defaultServer = (findProperty("playcircleServer") as String?) ?: "https://playcircle-in.onrender.com"
 
 android {
     namespace = "com.playcircle.app"

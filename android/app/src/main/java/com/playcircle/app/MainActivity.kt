@@ -581,7 +581,7 @@ class MainActivity : ComponentActivity() {
         }
         AlertDialog.Builder(this)
             .setTitle("PlayCircle server")
-            .setMessage("The address of your PlayCircle site, e.g. https://playcircle-174u.onrender.com")
+            .setMessage("The address of your PlayCircle site, e.g. https://playcircle-in.onrender.com")
             .setView(box)
             .setCancelable(cancelable)
             .setPositiveButton("Open") { _, _ ->
