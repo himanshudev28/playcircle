@@ -12,11 +12,15 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
+      # Canonical links / social previews (read at build time).
+      - key: NEXT_PUBLIC_SITE_URL
+        value: https://playcircle-174u.onrender.com
       # TURN relay for calls and live sharing across networks (see
-      # app/api/ice/route.ts). Set in the dashboard; never committed.
-      - key: METERED_APP
+      # app/api/ice/route.ts): ExpressTURN's free tier. The login is set in
+      # the dashboard, never committed.
+      - key: TURN_URLS
+        value: turn:free.expressturn.com:3478?transport=udp,turn:free.expressturn.com:3478?transport=tcp
+      - key: TURN_USERNAME
         sync: false
-      - key: METERED_API_KEY
-        sync: false
-      - key: ICE_SERVERS
+      - key: TURN_CREDENTIAL
         sync: false

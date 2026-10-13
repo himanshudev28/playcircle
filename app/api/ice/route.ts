@@ -3,9 +3,11 @@
    (mobile data, strict routers) a TURN relay carries the media instead.
 
    All optional, all server-side env so secrets stay out of the JS bundle:
-   - ICE_SERVERS        JSON array of RTCIceServer, e.g. fixed TURN
-                        credentials from ExpressTURN.
-   - METERED_APP +      Metered Open Relay: short-lived credentials fetched
+   - TURN_URLS +        A relay with a fixed login (e.g. ExpressTURN's free
+     TURN_USERNAME +    tier): comma-separated turn: URLs plus the username
+     TURN_CREDENTIAL    and password from its dashboard.
+   - ICE_SERVERS        JSON array of RTCIceServer, for anything else.
+   - METERED_APP +      Metered (paid tiers): short-lived credentials fetched
      METERED_API_KEY    from https://<app>.metered.live, cached for a while.
    Leftover NEXT_PUBLIC_ICE_SERVERS still works. */
 
@@ -51,8 +53,20 @@ async function meteredServers(): Promise<IceServer[]> {
   }
 }
 
+function fixedTurn(): IceServer[] {
+  const urls = (process.env.TURN_URLS ?? "")
+    .split(",")
+    .map((u) => u.trim())
+    .filter((u) => /^turns?:/.test(u));
+  const username = process.env.TURN_USERNAME?.trim();
+  const credential = process.env.TURN_CREDENTIAL?.trim();
+  if (!urls.length || !username || !credential) return [];
+  return [{ urls, username, credential }];
+}
+
 export async function GET() {
   const relays = [
+    ...fixedTurn(),
     ...parseList(process.env.ICE_SERVERS),
     ...parseList(process.env.NEXT_PUBLIC_ICE_SERVERS),
     ...(await meteredServers()),

@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val defaultServer = (findProperty("playcircleServer") as String?) ?: "https://playcircle.onrender.com"
+val defaultServer = (findProperty("playcircleServer") as String?) ?: "https://playcircle-174u.onrender.com"
 
 android {
     namespace = "com.playcircle.app"
@@ -16,6 +16,11 @@ android {
         versionCode = 1
         versionName = "1.0"
         buildConfigField("String", "DEFAULT_SERVER", "\"$defaultServer\"")
+        // Real phones only: WebRTC's native library is big, x86 builds
+        // (emulators) would double the APK for nothing.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     buildTypes {
