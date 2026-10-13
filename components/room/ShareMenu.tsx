@@ -2,13 +2,15 @@
 
 import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { Icon } from "@/components/Icon";
+import { useInNativeApp } from "@/lib/nativeApp";
 import type { ShareSource } from "@/lib/socket";
 import { isMobileDevice, type LiveStageApi } from "./useLiveStage";
 
 /* "Share" button + menu: a browser tab, the whole screen, a camera, or a
    video file from this device. While you're presenting it becomes "Stop
    sharing". Phones can't capture their screen from a browser at all, so
-   there the camera and file come first. */
+   there the camera and file come first — except in the Android app, which
+   shares the whole phone screen itself. */
 
 export function ShareMenu({
   api,
@@ -21,6 +23,7 @@ export function ShareMenu({
   inCall: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const inApp = useInNativeApp();
   const boxRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -65,8 +68,9 @@ export function ShareMenu({
     if (api.supported[source]) return null;
     if (source === "camera") return "This browser can't use a camera";
     if (source === "file") return "This browser can't stream files";
+    if (inApp) return "Use “Entire screen” — it covers every app";
     return mobile
-      ? "Phone browsers can't share the screen"
+      ? "Phone browsers can't — use the PlayCircle Android app"
       : "Your browser can't share screens";
   };
 
@@ -94,7 +98,7 @@ export function ShareMenu({
       <Item
         icon={<Icon name="monitor" size={17} />}
         title="Entire screen"
-        hint="Everything on one display"
+        hint={inApp ? "Your whole phone screen — open any app" : "Everything on one display"}
         disabledReason={reason("screen")}
         onClick={() => pick("screen")}
       />
@@ -161,7 +165,13 @@ export function ShareMenu({
           // wrapped toolbar, so an anchored popover would run off-screen.
           className="fixed inset-x-3 bottom-3 z-50 overflow-hidden rounded-card border border-edge bg-film-2 p-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))] shadow-2xl sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-full sm:z-40 sm:mt-2 sm:w-72 sm:pb-1.5"
         >
-          {mobile ? (
+          {inApp ? (
+            <>
+              {screenItems}
+              {fileItem}
+              {cameraItem}
+            </>
+          ) : mobile ? (
             <>
               {fileItem}
               {cameraItem}
@@ -175,9 +185,11 @@ export function ShareMenu({
             </>
           )}
           <p className="mt-1 border-t border-edge px-3 pb-1.5 pt-2.5 text-[11px] leading-snug text-dim">
-            {mobile
-              ? "Keep this tab open while you share — switching apps pauses it."
-              : "Copy-protected sites (Netflix etc.) show black."}
+            {inApp
+              ? "Screen sharing keeps going in other apps. Netflix and banking apps show black."
+              : mobile
+                ? "Keep this tab open while you share — switching apps pauses it."
+                : "Copy-protected sites (Netflix etc.) show black."}
           </p>
         </div>
       )}

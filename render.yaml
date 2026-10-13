@@ -1,0 +1,22 @@
+# Render Blueprint: the whole app (pages + Socket.IO, see server.js) as one
+# free web service. Free instances sleep after ~15 min idle and wake on the
+# next visit (~50 s); rooms live in memory, so a sleep or deploy resets them.
+services:
+  - type: web
+    name: playcircle
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/ice
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      # TURN relay for calls and live sharing across networks (see
+      # app/api/ice/route.ts). Set in the dashboard; never committed.
+      - key: METERED_APP
+        sync: false
+      - key: METERED_API_KEY
+        sync: false
+      - key: ICE_SERVERS
+        sync: false

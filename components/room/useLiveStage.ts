@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
   useMemo,
   useState,
@@ -17,6 +18,15 @@ import {
   type ShareSource,
   type StageQuality,
 } from "@/lib/socket";
+import { iceServers } from "@/lib/ice";
+import {
+  onNativeToast,
+  setNativeCap,
+  startNativeShare,
+  stopNativeShare,
+  useInNativeApp,
+  useNativeShare,
+} from "@/lib/nativeApp";
 
 /* Live stage: one presenter streams a browser tab, a screen, a camera or a
    local video file to everyone else in the room over WebRTC.
@@ -43,22 +53,6 @@ import {
    switch) is a replaceTrack() — never a renegotiation.
 
    Past ~8 viewers the presenter's upload is the bottleneck; that needs an SFU. */
-
-// Same ICE setup as calls: STUN by default, NEXT_PUBLIC_ICE_SERVERS (a JSON
-// array of RTCIceServer) to add a TURN relay for strict NATs.
-const ICE_SERVERS: RTCIceServer[] = (() => {
-  const raw = process.env.NEXT_PUBLIC_ICE_SERVERS;
-  if (raw) {
-    try {
-      return JSON.parse(raw) as RTCIceServer[];
-    } catch {
-      /* fall through to the default */
-    }
-  }
-  return [
-    { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
-  ];
-})();
 
 const MAX_VIEWERS = 8;
 /** A viewer with no working connection after this long asks again. */
@@ -99,9 +93,12 @@ export type LiveStageStats = {
 };
 
 export type LiveStageApi = {
-  /** Feature detection; tab/screen are false on phones. */
+  /** Feature detection; tab/screen are false on phones (screen is true in
+      the Android app, which shares the whole phone screen natively). */
   supported: { tab: boolean; screen: boolean; file: boolean; camera: boolean };
   isPresenter: boolean;
+  /** Presenting through the Android app: no preview or stats on this page. */
+  native: boolean;
   status: "idle" | "starting" | "connecting" | "live" | "failed";
   /** Viewer: the presenter's stream. */
   remoteStream: MediaStream | null;
@@ -1147,7 +1144,7 @@ class StageEngine {
 
     const streamId = share.streamId;
     const n = ++this.negotiation;
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const pc = new RTCPeerConnection({ iceServers: iceServers() });
     const videoTx = pc.addTransceiver(share.video ?? "video", { direction: "sendonly" });
     const audioTx = pc.addTransceiver(share.audio ?? "audio", { direction: "sendonly" });
     const peer: ViewerPeer = {
@@ -1400,7 +1397,7 @@ class StageEngine {
     if (data.sdp?.type === "offer") {
       // A new offer always replaces whatever we had.
       this.closeViewerPc(v);
-      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      const pc = new RTCPeerConnection({ iceServers: iceServers() });
       const n = data.n;
       v.pc = pc;
       v.n = n;
@@ -1597,12 +1594,22 @@ export function useLiveStage({
   media,
   selfId,
   onToast,
+  self,
 }: {
   media: Media | null;
   selfId: string | null;
   onToast: (msg: string) => void;
+  /** Who and where, for handing a screen share to the Android app. */
+  self: { code: string; name: string; clientId: string } | null;
 }): LiveStageApi {
-  const supported = useSyncExternalStore(noSubscribe, detectSupport, serverSupport);
+  const detected = useSyncExternalStore(noSubscribe, detectSupport, serverSupport);
+  const inApp = useInNativeApp();
+  const nativeShare = useNativeShare();
+  const native = inApp && nativeShare.phase !== "idle";
+  const supported = useMemo(
+    () => (inApp ? { ...detected, screen: true } : detected),
+    [inApp, detected]
+  );
   const [pres, setPres] = useState<PresState | null>(null);
   const [view, setView] = useState<ViewState | null>(null);
   const [viewerCount, setViewerCount] = useState(0);
@@ -1619,11 +1626,18 @@ export function useLiveStage({
   }, [engine, onToast]);
 
   useEffect(() => engine.attach(getSocket()), [engine]);
+  useEffect(() => onNativeToast(onToast), [onToast]);
 
   const liveId = media?.kind === "live" ? media.streamId : null;
   const livePresenter = media?.kind === "live" ? media.presenter : null;
+  // While the app shares, the share on stage is our own phone's: don't watch it.
   const watching =
-    !pres && !!liveId && !!livePresenter && !!selfId && livePresenter !== selfId;
+    !pres &&
+    !native &&
+    !!liveId &&
+    !!livePresenter &&
+    !!selfId &&
+    livePresenter !== selfId;
 
   // selfId changes on every reconnect; a new socket must ask again.
   useEffect(() => {
@@ -1648,6 +1662,8 @@ export function useLiveStage({
   let remoteStream: MediaStream | null = null;
   if (pres) {
     status = pres.phase === "starting" ? "starting" : "live";
+  } else if (native) {
+    status = nativeShare.phase === "starting" ? "starting" : "live";
   } else if (watching) {
     const mine = view?.streamId === liveId ? view : null;
     status = mine?.status ?? "connecting";
@@ -1655,10 +1671,33 @@ export function useLiveStage({
   }
   const shownStats = statsKey && stats?.key === statsKey ? stats.value : null;
 
+  // In the Android app, "screen" is the app's job; everything else stays here.
+  const startShare = useCallback(
+    async (source: ShareSource, file?: File, opts?: ShareOpts) => {
+      if (source !== "screen" || !inApp) return engine.startShare(source, file, opts);
+      if (pres || native) {
+        onToast("You're already sharing — stop that first");
+        return;
+      }
+      if (!self) return;
+      await startNativeShare({ ...self, title: `${self.name}'s phone`, cap });
+    },
+    [engine, inApp, pres, native, self, cap, onToast]
+  );
+  const stopShare = native ? stopNativeShare : engine.stopShare;
+  const setShareCap = useCallback(
+    (q: StageQuality) => {
+      engine.setCap(q);
+      if (native) setNativeCap(q);
+    },
+    [engine, native]
+  );
+
   return useMemo<LiveStageApi>(
     () => ({
       supported,
-      isPresenter: !!pres,
+      isPresenter: !!pres || native,
+      native: !pres && native,
       status,
       remoteStream,
       localPreview: pres?.preview ?? null,
@@ -1671,16 +1710,31 @@ export function useLiveStage({
       setCameraMic: engine.setCameraMic,
       primeFileShare: engine.primeFileShare,
       bindFileVideo: engine.bindFileVideo,
-      viewerCount: pres ? viewerCount : 0,
+      viewerCount: pres ? viewerCount : native ? nativeShare.viewers : 0,
       stats: shownStats,
       cap,
-      setCap: engine.setCap,
+      setCap: setShareCap,
       quality,
       setQuality: engine.setQuality,
-      startShare: engine.startShare,
-      stopShare: engine.stopShare,
+      startShare,
+      stopShare,
       retry: engine.retry,
     }),
-    [supported, pres, status, remoteStream, engine, viewerCount, shownStats, cap, quality]
+    [
+      supported,
+      pres,
+      native,
+      nativeShare.viewers,
+      status,
+      remoteStream,
+      engine,
+      viewerCount,
+      shownStats,
+      cap,
+      quality,
+      startShare,
+      stopShare,
+      setShareCap,
+    ]
   );
 }

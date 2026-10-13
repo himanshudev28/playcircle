@@ -35,6 +35,7 @@ export function LiveStageView({
   media: LiveMedia;
   isAdmin: boolean;
 }) {
+  if (api.native) return <NativePresenterView api={api} media={media} />;
   if (api.isPresenter) return <PresenterView api={api} media={media} />;
   return <ViewerView api={api} media={media} isAdmin={isAdmin} />;
 }
@@ -270,6 +271,61 @@ function PresenterView({ api, media }: { api: LiveStageApi; media: LiveMedia }) 
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------- Presenter, Android app */
+
+// The Android app captures and sends the phone screen itself, so this page
+// has no preview — showing one would mirror the screen into itself.
+function NativePresenterView({ api, media }: { api: LiveStageApi; media: LiveMedia }) {
+  const { status, viewerCount, cap, setCap, stopShare } = api;
+  const watching = viewerCount === 1 ? "1 watching" : `${viewerCount} watching`;
+  return (
+    <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-ink px-6 text-center">
+      {status === "starting" ? (
+        <>
+          <Spinner />
+          <p className="text-sm font-semibold">Starting your screen share…</p>
+          <p className="max-w-xs text-xs text-smoke">
+            Tap “Start now” and pick “Entire screen” when Android asks.
+          </p>
+        </>
+      ) : (
+        <>
+          <span className="flex items-center gap-2 text-sm">
+            <LiveDot />
+            <span>
+              Your phone screen is live as{" "}
+              <span className="font-semibold">{media.title}</span>
+              <span className="text-smoke"> · {watching}</span>
+            </span>
+          </span>
+          <p className="max-w-xs text-xs text-smoke">
+            Open any app — everyone sees what&apos;s on your screen. Come back here or use
+            the notification to stop.
+          </p>
+          <div className="flex items-center gap-2">
+            <QualityMenu label="Max quality" value={cap} onChange={setCap} />
+            <button
+              onClick={stopShare}
+              className="flex items-center gap-1.5 rounded-full bg-signal px-3 py-1.5 text-xs font-semibold transition hover:bg-signal-hot active:scale-95"
+            >
+              <StopIcon />
+              Stop sharing
+            </button>
+          </div>
+        </>
+      )}
+      {status === "starting" && (
+        <button
+          onClick={stopShare}
+          className="rounded-full border border-edge px-3 py-1.5 text-xs font-medium text-smoke transition hover:bg-bone/5"
+        >
+          Cancel
+        </button>
+      )}
     </div>
   );
 }

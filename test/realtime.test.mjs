@@ -1543,6 +1543,72 @@ describe("realtime", () => {
     });
   });
 
+  /* 12b */
+  describe("companion (Android app share link)", () => {
+    test("only joins a room its person is in", async () => {
+      const { code } = await pair();
+      const app = await srv.connect();
+      const denied = once(app, "room:denied");
+      app.emit("room:join", { code, name: "Nobody", clientId: `x-${code}`, companion: true });
+      assert.equal((await denied).reason, "missing");
+
+      const fresh = roomCode();
+      const denied2 = once(app, "room:denied");
+      app.emit("room:join", { code: fresh, name: "Host", clientId: "x", companion: true });
+      assert.equal((await denied2).reason, "missing");
+      assert.equal(srv.rt.rooms.has(fresh), false);
+    });
+
+    test("hidden, never takes the crown, and shares with its person's rights", async () => {
+      const { code, host, viewer } = await pair();
+      const app = await srv.connect();
+      const quietChat = none(viewer, "chat:message");
+      const quietUsers = none(viewer, "room:users", (users) => users.length !== 2);
+      const st = await join(app, { code, name: "Host", clientId: `h-${code}`, companion: true });
+      await Promise.all([quietChat, quietUsers]);
+      const room = srv.rt.rooms.get(code);
+      assert.equal(room.hostId, host.id);
+      assert.equal(st.users.length, 2);
+      assert.ok(!st.users.some((u) => u.id === app.id));
+
+      // The owner's companion may present; the stage names the person.
+      const load = once(viewer, "player:action", (a) => a.media?.kind === "live");
+      const res = await ack(app, "stage:start", { source: "screen", title: "Host's phone" });
+      assert.equal(res.ok, true);
+      const a = await load;
+      assert.equal(a.media.presenter, app.id);
+      assert.equal(a.media.by, "Host");
+
+      // Viewers reach it like any presenter.
+      const wanted = once(app, "stage:viewer");
+      viewer.emit("stage:want", { streamId: res.streamId });
+      assert.equal((await wanted).id, viewer.id);
+
+      // Closing the app ends the share, quietly — no "left" line.
+      const cleared = once(viewer, "player:action", (x) => x.type === "load" && x.media === null);
+      const noLeft = none(viewer, "chat:message", (m) => / left /.test(m.text), 300);
+      app.disconnect();
+      await cleared;
+      await noLeft;
+      assert.equal(room.hostId, host.id);
+    });
+
+    test("a viewer's companion has no extra rights, and the crown skips it", async () => {
+      const { code, host, viewer } = await pair();
+      const app = await srv.connect();
+      await join(app, { code, name: "Viewer", clientId: `v-${code}`, companion: true });
+      assert.equal((await ack(app, "stage:start", { source: "screen" })).ok, false);
+
+      // The host leaves: the crown waits out the grace period, then goes to a
+      // person — the viewer's real tab, never the companion.
+      const crowned = once(viewer, "room:host", (id) => !!id);
+      host.disconnect();
+      assert.equal(await crowned, viewer.id);
+      // Now host, the viewer's companion borrows the right to present.
+      assert.equal((await ack(app, "stage:start", { source: "screen" })).ok, true);
+    });
+  });
+
   /* 13 */
   describe("password rooms", () => {
     function tryJoin(sock, payload) {

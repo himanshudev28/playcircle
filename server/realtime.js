@@ -187,7 +187,16 @@ function attachRealtime(io, options = {}) {
   /* ---- Authority ----
      The creator (owner) is permanent: whenever they're in the room they hold
      the crown, and nobody else can act on them. The host is whoever holds
-     the crown right now. Both owner and host are admins. */
+     the crown right now. Both owner and host are admins.
+
+     A companion is a second, hidden connection from the same person — the
+     Android app's screen-share link, sitting next to its in-app room page.
+     It never holds the crown, isn't listed, and borrows its person's rights. */
+
+  // Everyone actually in the room, without companion connections.
+  function people(room) {
+    return [...room.users.entries()].filter(([, u]) => !u.companion);
+  }
 
   function isOwnerId(room, socketId) {
     const u = room.users.get(socketId);
@@ -195,17 +204,19 @@ function attachRealtime(io, options = {}) {
   }
 
   function ownerPresent(room) {
-    return [...room.users.values()].some((u) => u.clientId === room.ownerClientId);
+    return people(room).some(([, u]) => u.clientId === room.ownerClientId);
   }
 
   // One of the owner's sockets ([socketId, user]), or undefined if they're away.
   function ownerEntry(room) {
     if (!room.ownerClientId) return undefined;
-    return [...room.users.entries()].find(([, u]) => u.clientId === room.ownerClientId);
+    return people(room).find(([, u]) => u.clientId === room.ownerClientId);
   }
 
   function isAdmin(room, socketId) {
-    return room.hostId === socketId || isOwnerId(room, socketId);
+    if (room.hostId === socketId || isOwnerId(room, socketId)) return true;
+    const u = room.users.get(socketId);
+    return !!u?.companion && room.users.get(room.hostId)?.clientId === u.clientId;
   }
 
   // Room-wide switches: the owner, or the host standing in while they're away.
@@ -246,7 +257,7 @@ function attachRealtime(io, options = {}) {
 
   // Public view of the people in a room. clientIds stay server-side.
   function publicUsers(room) {
-    return [...room.users.entries()].map(([id, u]) => {
+    return people(room).map(([id, u]) => {
       const c = room.callers.get(id);
       return {
         id,
@@ -340,7 +351,7 @@ function attachRealtime(io, options = {}) {
         nowPlaying: r.media?.title || null,
         isPlaying: r.isPlaying,
         count: headcount(r),
-        hosts: [...r.users.values()].slice(0, 4).map((u) => ({
+        hosts: people(r).slice(0, 4).map(([, u]) => ({
           name: u.name,
           color: u.color,
         })),
@@ -372,7 +383,7 @@ function attachRealtime(io, options = {}) {
   }
 
   function noticeAdmins(room, text) {
-    for (const sid of room.users.keys()) {
+    for (const [sid] of people(room)) {
       if (isAdmin(room, sid)) io.to(sid).emit("room:notice", text);
     }
   }
@@ -516,9 +527,7 @@ function attachRealtime(io, options = {}) {
       // straight back to the creator if they're here (this is also how the
       // owner kicking the stand-in host works). Otherwise hold it for the
       // host to reconnect before anyone else can take it.
-      const sibling = [...room.users.entries()].find(
-        ([, u]) => u.clientId === room.hostClientId
-      );
+      const sibling = people(room).find(([, u]) => u.clientId === room.hostClientId);
       const owner = !sibling && ownerEntry(room);
       if (sibling) {
         setHost(room, sibling[0]);
@@ -532,13 +541,14 @@ function attachRealtime(io, options = {}) {
         room.hostTimer = setTimeout(() => {
           room.hostTimer = null;
           if (rooms.get(code) !== room) return;
-          if (room.hostId || room.users.size === 0) return;
-          const back = ownerEntry(room);
-          const [nextId, next] = back || room.users.entries().next().value;
+          if (room.hostId) return;
+          const back = ownerEntry(room) || people(room)[0];
+          if (!back) return;
+          const [nextId, next] = back;
           setHost(room, nextId);
           emitSystem(
             room,
-            back
+            next.clientId === room.ownerClientId
               ? `${next.name} (room creator) is the host again`
               : `${next.name} is now the host`
           );
@@ -552,7 +562,7 @@ function attachRealtime(io, options = {}) {
       return;
     }
 
-    if (user && announce) {
+    if (user && announce && !user.companion) {
       const { clientId, name } = user;
       clearTimeout(room.pendingLeaves.get(clientId));
       room.pendingLeaves.set(
@@ -978,6 +988,14 @@ function attachRealtime(io, options = {}) {
       }
       const cid = str(p.clientId, 64) || socket.id;
       const displayName = str(p.name, 24) || "Guest";
+      // A companion only joins a room its person is in right now — it never
+      // makes one, and never outlives them into an empty room.
+      const companion = p.companion === true;
+      const target = rooms.get(code);
+      if (companion && !(target && people(target).some(([, u]) => u.clientId === cid))) {
+        socket.emit("room:denied", { reason: "missing" });
+        return;
+      }
       // Every join supersedes any earlier one still checking a password.
       const seq = (socket.data.joinSeq = (socket.data.joinSeq || 0) + 1);
 
@@ -1039,7 +1057,7 @@ function attachRealtime(io, options = {}) {
 
       // The first person in the room (its creator) sets its metadata. A room
       // restored from disk already has an owner.
-      if (isNew || !room.ownerClientId) {
+      if (!companion && (isNew || !room.ownerClientId)) {
         room.isPublic = !!p.isPublic;
         room.title = str(p.title, 60) || null;
         room.ownerClientId = cid;
@@ -1047,6 +1065,7 @@ function attachRealtime(io, options = {}) {
 
       // Back within the grace window, or just another tab: no "joined" line.
       const quietJoin =
+        companion ||
         room.pendingLeaves.has(cid) ||
         [...room.users.values()].some((u) => u.clientId === cid);
       clearTimeout(room.pendingLeaves.get(cid));
@@ -1060,13 +1079,20 @@ function attachRealtime(io, options = {}) {
         room.colors.set(cid, color);
       }
       room.members.add(cid);
-      room.users.set(socket.id, { name: displayName, color, clientId: cid });
+      room.users.set(
+        socket.id,
+        companion
+          ? { name: displayName, color, clientId: cid, companion: true }
+          : { name: displayName, color, clientId: cid }
+      );
 
       // The creator always takes the crown back. Otherwise a host returning
       // from a blip reclaims it, and an unclaimed room goes to whoever walks
       // in (unless we're still holding it for someone's reconnect).
       let reclaimed = false;
-      if (cid === room.ownerClientId) {
+      if (companion) {
+        // Never takes the crown.
+      } else if (cid === room.ownerClientId) {
         const holder = room.hostId && room.users.get(room.hostId);
         reclaimed = !!holder && holder.clientId !== cid;
         setHost(room, socket.id);

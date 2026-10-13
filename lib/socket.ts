@@ -4,12 +4,16 @@ import { io, type Socket } from "socket.io-client";
 
 let socket: Socket | null = null;
 
+/* Where the realtime server lives. Empty: this same origin (server.js runs
+   pages and Socket.IO together). Set NEXT_PUBLIC_SOCKET_URL when the pages
+   are hosted somewhere that can't hold WebSockets (e.g. Vercel) and the
+   server runs elsewhere (e.g. Render). /api/ice is read from there too. */
+export const REALTIME_URL = (process.env.NEXT_PUBLIC_SOCKET_URL ?? "").replace(/\/+$/, "");
+
 export function getSocket(): Socket {
   if (!socket) {
-    socket = io({
-      autoConnect: true,
-      transports: ["websocket", "polling"],
-    });
+    const opts = { autoConnect: true, transports: ["websocket", "polling"] };
+    socket = REALTIME_URL ? io(REALTIME_URL, opts) : io(opts);
   }
   return socket;
 }
@@ -124,7 +128,9 @@ export type DeniedReason =
   | "invalid"
   /** Needs a password: re-send room:join with `password`. `wrong` when one
       was sent and didn't match. */
-  | "password";
+  | "password"
+  /** A companion (the Android app's share link) whose person isn't in the room. */
+  | "missing";
 
 /* A random id per browser, kept in localStorage. Socket ids change on every
    reconnect; this is what lets a host refresh without losing the crown, and

@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -32,6 +33,7 @@ import {
   type RoomUser,
   type YoutubeMedia,
 } from "@/lib/socket";
+import { prefetchIce } from "@/lib/ice";
 import { parseYouTubeId } from "@/lib/youtube";
 import { useCall } from "./useCall";
 import { Avatar, CallPanel } from "./CallPanel";
@@ -174,7 +176,15 @@ export function RoomClient({ code }: { code: string }) {
     mediaRef.current = media;
   }, [media]);
 
-  const stage = useLiveStage({ media, selfId, onToast: showToast });
+  // Relay credentials ready before anyone calls or shares.
+  useEffect(() => {
+    void prefetchIce();
+  }, []);
+  const shareAs = useMemo(
+    () => (name ? { code, name, clientId: getClientId() } : null),
+    [code, name]
+  );
+  const stage = useLiveStage({ media, selfId, onToast: showToast, self: shareAs });
   // A camera share's mic would double your voice for anyone in the call.
   const { setCameraMic } = stage;
   const sharingCamera = !!stage.camera;
@@ -962,6 +972,11 @@ const CLOSED_COPY: Record<
   password: {
     title: "This room is protected",
     body: "It needs a password to join. Ask the host for it, then try the link again.",
+  },
+  // Only the Android app's share link gets this; a browser never should.
+  missing: {
+    title: "You're not in this room",
+    body: "Join the room first, then start sharing from it.",
   },
 };
 

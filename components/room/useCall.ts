@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getSocket } from "@/lib/socket";
+import { iceServers } from "@/lib/ice";
 
 /* Voice/video calls as a WebRTC mesh: every caller holds one peer connection
    to every other caller, and Socket.IO carries the offers/answers/candidates.
@@ -14,23 +15,6 @@ import { getSocket } from "@/lib/socket";
    Every call seat has a server-issued session id, and signals are addressed
    session-to-session. A leave + quick rejoin therefore can't have a stale
    answer or candidate from the previous seat applied to the new connection. */
-
-// STUN is enough on most home networks. Behind strict NATs / corporate
-// firewalls you need a TURN relay: set NEXT_PUBLIC_ICE_SERVERS to a JSON
-// array of RTCIceServer objects.
-const ICE_SERVERS: RTCIceServer[] = (() => {
-  const raw = process.env.NEXT_PUBLIC_ICE_SERVERS;
-  if (raw) {
-    try {
-      return JSON.parse(raw) as RTCIceServer[];
-    } catch {
-      /* fall through to the default */
-    }
-  }
-  return [
-    { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
-  ];
-})();
 
 const AUDIO: MediaTrackConstraints = {
   echoCancellation: true,
@@ -170,7 +154,7 @@ export function useCall(onNotice: (msg: string) => void) {
       if (asInitiator) initiated.current.add(id);
       else initiated.current.delete(id);
 
-      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+      const pc = new RTCPeerConnection({ iceServers: iceServers() });
       pc.onicecandidate = (e) => {
         if (e.candidate && pcs.current.get(id) === pc) {
           send(id, { candidate: e.candidate.toJSON() });
