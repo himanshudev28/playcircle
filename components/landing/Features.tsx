@@ -1,133 +1,177 @@
-"use client";
-
 import Link from "next/link";
-import { motion } from "framer-motion";
 import { SectionHeading } from "./SectionHeading";
+import { Reveal } from "@/components/Reveal";
+import { Icon, type IconName } from "@/components/Icon";
+import { LiveDot } from "@/components/ui";
 
-type Badge = "NEW" | "LIVE" | "PLANNED";
+type Status = "live" | "new" | "planned";
 
+/* The grid is deliberately uneven: a tile's size tracks how real the feature
+   is. What you can use today is the biggest thing on the screen; what's still
+   on the roadmap sits quietly at the bottom. Size is the status. */
 const FEATURES: {
-  icon: string;
+  icon: IconName;
   title: string;
   body: string;
-  badge: Badge;
+  status: Status;
   href?: string;
+  span: string;
 }[] = [
   {
-    icon: "📹",
-    title: "Video & Audio Calls",
-    body: "Talk face-to-face or voice-only while you watch. No need to switch apps.",
-    badge: "NEW",
-  },
-  {
-    icon: "✉️",
-    title: "Direct Messages",
-    body: "Send private messages to your friends and stay connected outside of rooms.",
-    badge: "NEW",
-  },
-  {
-    icon: "🕶️",
-    title: "Anonymous Venting",
-    body: "Share your thoughts anonymously on the global feed and chat with strangers.",
-    badge: "NEW",
-    href: "/vent",
-  },
-  {
-    icon: "🎉",
-    title: "Public Lobbies",
-    body: "Find new friends and join open watch parties directly from the lobby.",
-    badge: "LIVE",
+    icon: "door",
+    title: "Public lobbies",
+    body: "Find new friends and join open watch parties directly from the lobby. Rooms appear the moment someone opens one.",
+    status: "live",
     href: "/lobby",
+    span: "lg:col-span-2",
   },
   {
-    icon: "🎧",
-    title: "Audio Rooms",
-    body: "Drop into voice-only rooms for podcasts, music sessions, or just hanging out.",
-    badge: "PLANNED",
+    icon: "mask",
+    title: "Anonymous venting",
+    body: "Share what's on your mind on the global feed under a random alias.",
+    status: "live",
+    href: "/vent",
+    span: "lg:col-span-1",
   },
   {
-    icon: "📺",
-    title: "More Platforms",
-    body: "Twitch, Vimeo, Dailymotion and more. Watch anything together, from anywhere.",
-    badge: "PLANNED",
+    icon: "video",
+    title: "Video & audio calls",
+    body: "Talk face-to-face or voice-only while you watch, without switching apps.",
+    status: "new",
+    span: "lg:col-span-1",
+  },
+  {
+    icon: "mail",
+    title: "Direct messages",
+    body: "Message friends privately and stay connected outside of rooms.",
+    status: "new",
+    span: "lg:col-span-1",
+  },
+  {
+    icon: "headphones",
+    title: "Audio rooms",
+    body: "Voice-only rooms for podcasts, music sessions, or just hanging out.",
+    status: "planned",
+    span: "lg:col-span-1",
+  },
+  {
+    icon: "monitor",
+    title: "More platforms",
+    body: "Twitch, Vimeo, and Dailymotion next — so you can watch almost anything together.",
+    status: "planned",
+    span: "lg:col-span-3",
   },
 ];
 
-const badgeStyles: Record<Badge, string> = {
-  NEW: "bg-brand/15 text-brand border-brand/30",
-  LIVE: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
-  PLANNED: "bg-white/[0.04] text-white/45 border-hairline",
+const STATUS_LABEL: Record<Status, string> = {
+  live: "Live now",
+  new: "New",
+  planned: "Planned",
 };
 
 export function Features() {
   return (
-    <section className="mx-auto max-w-7xl px-5 py-24 sm:px-8">
-      <SectionHeading
-        kicker="Everything you need"
-        title="More than just watching."
-        subtitle="Connect, chat, and share moments with our built-in social features."
-      />
-      <div className="mt-16 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <section id="features" className="mx-auto max-w-7xl px-5 py-24 sm:px-8">
+      <div className="flex flex-wrap items-end justify-between gap-6">
+        <SectionHeading
+          time="03:04"
+          kicker="Everything you need"
+          title="More than just watching."
+          subtitle="Connect, chat, and share moments with the social features built in around the video."
+        />
+        <p className="data text-faint">Live today, and what comes next</p>
+      </div>
+
+      <div className="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {FEATURES.map((f, i) => (
-          <motion.div
-            key={f.title}
-            initial={{ opacity: 0, y: 30 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true, margin: "-60px" }}
-            transition={{ duration: 0.6, delay: (i % 3) * 0.1 }}
-          >
-            <FeatureCardShell href={f.href}>
-              <div className="flex items-start justify-between">
-                <span className="grid h-12 w-12 place-items-center rounded-2xl bg-white/[0.04] text-2xl">
-                  {f.icon}
-                </span>
-                <span
-                  className={`rounded-full border px-2.5 py-1 text-[0.65rem] font-bold tracking-widest ${
-                    badgeStyles[f.badge]
-                  }`}
-                >
-                  {f.badge}
-                </span>
-              </div>
-              <h3 className="mt-6 flex items-center gap-2 text-lg font-bold">
-                {f.title}
-                {f.href && (
-                  <span className="text-brand opacity-0 transition group-hover:opacity-100">
-                    →
-                  </span>
-                )}
-              </h3>
-              <p className="mt-2 text-sm leading-relaxed text-white/55">
-                {f.body}
-              </p>
-              {f.href && (
-                <span className="mt-3 inline-block text-sm font-semibold text-brand">
-                  Try it now
-                </span>
-              )}
-            </FeatureCardShell>
-          </motion.div>
+          <Reveal key={f.title} delay={(i % 3) * 0.08} className={f.span}>
+            <FeatureTile {...f} />
+          </Reveal>
         ))}
       </div>
     </section>
   );
 }
 
-function FeatureCardShell({
+function FeatureTile({
+  icon,
+  title,
+  body,
+  status,
   href,
-  children,
 }: {
+  icon: IconName;
+  title: string;
+  body: string;
+  status: Status;
   href?: string;
-  children: React.ReactNode;
 }) {
-  const className =
-    "group relative block h-full rounded-3xl border border-hairline bg-white/[0.02] p-7 transition hover:-translate-y-1 hover:border-brand/30 hover:bg-white/[0.04]";
-  if (href) {
-    return (
-      <Link href={href} className={className}>
-        {children}
-      </Link>
-    );
-  }
-  return <div className={className}>{children}</div>;
+  const planned = status === "planned";
+
+  const content = (
+    <>
+      <div className="flex items-start justify-between gap-4">
+        <span
+          className={`grid h-11 w-11 place-items-center rounded-card border ${
+            planned
+              ? "border-edge bg-film-2 text-dim"
+              : status === "live"
+                ? "border-signal/35 bg-signal/10 text-signal"
+                : "border-tungsten/30 bg-tungsten/10 text-tungsten"
+          }`}
+        >
+          <Icon name={icon} size={19} />
+        </span>
+
+        <span className="flex items-center gap-1.5">
+          {status === "live" && <LiveDot />}
+          <span
+            className={`data ${
+              status === "live"
+                ? "text-signal"
+                : status === "new"
+                  ? "text-tungsten"
+                  : "text-faint"
+            }`}
+          >
+            {STATUS_LABEL[status]}
+          </span>
+        </span>
+      </div>
+
+      <h3 className="mt-7 font-display text-lg font-bold text-bone">{title}</h3>
+      <p
+        className={`mt-2.5 max-w-lg leading-7 ${planned ? "text-dim" : "text-smoke"}`}
+      >
+        {body}
+      </p>
+
+      {href && (
+        <span className="mt-5 inline-flex items-center gap-2 text-sm font-semibold text-signal">
+          Open it
+          <Icon
+            name="arrowRight"
+            size={16}
+            className="transition-transform duration-200 group-hover:translate-x-1"
+          />
+        </span>
+      )}
+    </>
+  );
+
+  const cls = [
+    "group flex h-full flex-col rounded-panel border p-7 transition-colors duration-300",
+    planned
+      ? "border-edge bg-transparent"
+      : "border-edge bg-film hover:border-edge-strong",
+    href ? "hover:bg-film-2" : "",
+  ].join(" ");
+
+  return href ? (
+    <Link href={href} className={cls}>
+      {content}
+    </Link>
+  ) : (
+    <div className={cls}>{content}</div>
+  );
 }

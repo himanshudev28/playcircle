@@ -1,8 +1,7 @@
-"use client";
-
-import Link from "next/link";
-import { motion } from "framer-motion";
+import Image from "next/image";
 import { Reveal } from "@/components/Reveal";
+import { Button, LiveDot, SectionMarker } from "@/components/ui";
+import { Icon } from "@/components/Icon";
 
 const BULLETS = [
   "Private room links that are easy to share",
@@ -11,54 +10,53 @@ const BULLETS = [
   "Simple on mobile and desktop browsers",
 ];
 
+const CHAT = [
+  { u: "Maya", m: "this part gets me every time", tint: "#3a2a28" },
+  { u: "Leo", m: "wait rewind rewind", tint: "#2b2f38" },
+  { u: "Ade", m: "ok pausing, getting snacks", tint: "#37302a" },
+];
+
 export function RoomPreview() {
   return (
-    <section className="relative mx-auto max-w-7xl px-5 py-24 sm:px-8">
-      <div className="grid items-center gap-12 lg:grid-cols-2">
+    <section className="mx-auto max-w-7xl px-5 py-24 sm:px-8">
+      <div className="grid items-center gap-14 lg:grid-cols-[0.85fr_1.15fr] lg:gap-16">
         <div>
           <Reveal>
-            <div className="kicker text-brand">Ready when you are</div>
+            <SectionMarker time="04:20" label="Ready when you are" />
           </Reveal>
           <Reveal delay={0.05}>
-            <h2 className="mt-4 text-4xl font-extrabold leading-tight tracking-tight sm:text-5xl">
+            <h2 className="mt-5 font-display text-4xl font-extrabold leading-[1.02] text-bone sm:text-5xl">
               Open a room.
               <br />
               Bring everyone in.
             </h2>
           </Reveal>
           <Reveal delay={0.1}>
-            <p className="mt-5 max-w-md text-base leading-relaxed text-white/55">
+            <p className="mt-5 max-w-md leading-8 text-smoke">
               No big setup and no pressure. Just a simple way to share the same
-              screen, the same jokes, and the same moment with people who matter
-              to you.
+              screen, the same jokes, and the same moment with the people who
+              matter to you.
             </p>
           </Reveal>
           <Reveal delay={0.15}>
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-              <Link
-                href="/join"
-                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-brand px-7 py-4 font-semibold shadow-[0_16px_50px_-16px_rgba(240,69,75,0.9)] transition hover:bg-brand-bright active:scale-[0.98]"
-              >
-                Create Free Account →
-              </Link>
-              <Link
-                href="/join"
-                className="inline-flex items-center justify-center gap-2 rounded-2xl border border-hairline bg-white/[0.03] px-7 py-4 font-semibold text-white/90 transition hover:bg-white/[0.06]"
-              >
-                Continue with Google
-              </Link>
+              <Button href="/join" iconAfter="arrowRight">
+                Create your room
+              </Button>
+              <Button href="/lobby" variant="ghost">
+                Browse public rooms
+              </Button>
             </div>
           </Reveal>
           <Reveal delay={0.2}>
-            <ul className="mt-8 space-y-3">
+            <ul className="mt-9 space-y-3.5">
               {BULLETS.map((b) => (
-                <li
-                  key={b}
-                  className="flex items-center gap-3 text-sm text-white/65"
-                >
-                  <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-brand/15 text-[0.7rem] text-brand">
-                    ✓
-                  </span>
+                <li key={b} className="flex items-start gap-3 text-smoke">
+                  <Icon
+                    name="check"
+                    size={17}
+                    className="mt-1 shrink-0 text-signal"
+                  />
                   {b}
                 </li>
               ))}
@@ -66,75 +64,99 @@ export function RoomPreview() {
           </Reveal>
         </div>
 
-        {/* Room mockup */}
         <Reveal delay={0.1}>
-          <motion.div
-            initial={{ rotate: -1 }}
-            whileHover={{ rotate: 0, scale: 1.01 }}
-            transition={{ type: "spring", stiffness: 200, damping: 20 }}
-            className="overflow-hidden rounded-3xl border border-hairline bg-panel shadow-2xl"
-          >
-            <div className="flex items-center justify-between border-b border-hairline px-5 py-4">
-              <div className="flex items-center gap-2">
-                <span className="h-3 w-3 rounded-full bg-brand/70" />
-                <span className="h-3 w-3 rounded-full bg-white/20" />
-                <span className="h-3 w-3 rounded-full bg-white/20" />
-              </div>
-              <span className="kicker text-white/40">Room Preview</span>
-            </div>
-            <div className="p-5">
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="text-lg font-bold">Friday Night Room</div>
-                  <div className="font-mono text-xs text-white/40">WNP-204</div>
-                </div>
-                <span className="flex items-center gap-1.5 rounded-full bg-brand/15 px-3 py-1 text-xs font-semibold text-brand">
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
-                  LIVE
-                </span>
-              </div>
-
-              <div className="relative mt-4 aspect-video overflow-hidden rounded-2xl bg-gradient-to-br from-brand/25 via-black to-black">
-                <div className="absolute inset-0 grid place-items-center">
-                  <span className="grid h-16 w-16 place-items-center rounded-full bg-white/90 text-black shadow-2xl">
-                    <svg width={22} height={22} viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M8 5v14l11-7z" />
-                    </svg>
-                  </span>
-                </div>
-                <div className="absolute bottom-3 left-4 right-4">
-                  <div className="kicker text-white/60">Now Playing</div>
-                  <div className="mt-1 truncate text-sm font-medium">
-                    Feel-good movie soundtrack session
-                  </div>
-                  <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/15">
-                    <div className="h-full w-1/3 rounded-full bg-brand" />
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-4 space-y-2">
-                {[
-                  { u: "Maya", m: "this part gets me every time 😭", c: "bg-brand/20" },
-                  { u: "Leo", m: "wait rewind rewind", c: "bg-white/10" },
-                ].map((row) => (
-                  <div key={row.u} className="flex items-start gap-2 text-sm">
-                    <span
-                      className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-xs font-bold ${row.c}`}
-                    >
-                      {row.u[0]}
-                    </span>
-                    <div>
-                      <span className="text-white/50">{row.u} </span>
-                      <span className="text-white/85">{row.m}</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </motion.div>
+          <RoomMock />
         </Reveal>
       </div>
     </section>
+  );
+}
+
+function RoomMock() {
+  return (
+    <div className="overflow-hidden rounded-hero border border-edge bg-film shadow-[0_40px_120px_-40px_rgba(0,0,0,0.9)]">
+      {/* Room bar */}
+      <div className="flex items-center justify-between gap-4 border-b border-edge px-5 py-3.5">
+        <div className="flex items-center gap-3">
+          <span className="font-display text-sm font-bold text-bone">
+            Friday Night Room
+          </span>
+          <span className="rounded-md border border-edge bg-ink px-2 py-0.5 font-mono text-[0.65rem] tracking-widest text-dim">
+            PC-204
+          </span>
+        </div>
+        <span className="flex items-center gap-1.5">
+          <LiveDot />
+          <span className="data text-signal">Live</span>
+        </span>
+      </div>
+
+      <div className="grid sm:grid-cols-[1.55fr_1fr]">
+        {/* Stage */}
+        <div className="border-b border-edge sm:border-b-0 sm:border-r">
+          <div className="relative aspect-video">
+            <Image
+              src="https://images.unsplash.com/photo-1517604931442-7e0c8ed2963c?auto=format&fit=crop&w=1200&q=80"
+              alt=""
+              fill
+              sizes="(max-width: 640px) 100vw, 480px"
+              className="object-cover opacity-45"
+            />
+            <div className="absolute inset-0 bg-linear-to-t from-ink via-ink/40 to-transparent" />
+            <span className="absolute inset-0 m-auto grid h-14 w-14 place-items-center rounded-full bg-bone text-ink shadow-2xl">
+              <Icon name="play" size={20} className="ml-0.5" />
+            </span>
+          </div>
+
+          <div className="p-4">
+            <p className="data text-dim">Now playing</p>
+            <p className="mt-2 truncate text-sm font-medium text-bone">
+              Feel-good movie soundtrack session
+            </p>
+            <div className="mt-4 flex items-center gap-3">
+              <Icon name="pause" size={15} className="shrink-0 text-bone" />
+              <span className="data tnum text-dim">12:04</span>
+              <span className="relative h-1 flex-1 rounded-full bg-bone/12">
+                <span className="absolute inset-y-0 left-0 w-2/5 rounded-full bg-linear-to-r from-signal to-tungsten" />
+                <span className="absolute left-2/5 top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-bone shadow-[0_0_10px_rgba(244,67,60,0.9)]" />
+              </span>
+              <span className="data tnum text-dim">31:47</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Chat */}
+        <div className="flex flex-col p-4">
+          <div className="flex items-center justify-between">
+            <p className="data text-dim">Room chat</p>
+            <span className="data text-faint">4 here</span>
+          </div>
+
+          <div className="mt-4 flex-1 space-y-3.5">
+            {CHAT.map((c) => (
+              <div key={c.u} className="flex items-start gap-2.5">
+                <span
+                  className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-[0.6rem] font-bold text-bone"
+                  style={{ background: c.tint }}
+                >
+                  {c.u[0]}
+                </span>
+                <p className="text-[0.8rem] leading-relaxed">
+                  <span className="text-dim">{c.u}</span>{" "}
+                  <span className="text-bone/90">{c.m}</span>
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-5 flex items-center gap-2 rounded-full border border-edge bg-ink px-3.5 py-2.5">
+            <span className="flex-1 text-[0.8rem] text-faint">
+              Say something…
+            </span>
+            <Icon name="send" size={15} className="text-dim" />
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

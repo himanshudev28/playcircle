@@ -1,75 +1,87 @@
-"use client";
-
-import { motion } from "framer-motion";
 import { SectionHeading } from "./SectionHeading";
+import { Reveal } from "@/components/Reveal";
+import { Icon, type IconName } from "@/components/Icon";
 
-const CASES = [
+/* These are audiences, not a sequence — so no 01/02/03. They're set as a
+   divided index instead of a card grid: an editorial list reads as "here are
+   the kinds of people who use this", which is what the section actually says. */
+const CASES: {
+  icon: IconName;
+  kicker: string;
+  title: string;
+  body: string;
+  detail: string;
+}[] = [
   {
-    icon: "♥",
-    kicker: "LONG·DISTANCE",
+    icon: "heart",
+    kicker: "Long-distance",
     title: "For nights that feel better when you are watching side by side.",
     body: "Pick something you both love, talk through the quiet parts, and keep your usual rhythm even when you are apart.",
-    footer: "A simple room can still feel like a habit you kept together.",
+    detail: "A simple room can still feel like a habit you kept together.",
   },
   {
-    icon: "👥",
-    kicker: "FRIENDS",
+    icon: "users",
+    kicker: "Friends",
     title: "For group chats that deserve more than a link drop.",
     body: "Start a room for movie nights, comedy clips, playlists, or comfort rewatches and keep everyone on the same moment.",
-    footer: "Less counting down in the chat. More actually reacting together.",
+    detail: "Less counting down in the chat. More actually reacting together.",
   },
   {
-    icon: "🌍",
-    kicker: "COMMUNITIES",
+    icon: "globe",
+    kicker: "Communities",
     title: "For clubs, communities, and remote teams that gather online.",
     body: "Host shared demos, premieres, or casual sessions in one room that feels organized without feeling stiff.",
-    footer: "Structured enough to host people, relaxed enough to feel natural.",
+    detail: "Structured enough to host people, relaxed enough to feel natural.",
   },
   {
-    icon: "💬",
-    kicker: "SOCIAL HUB",
+    icon: "message",
+    kicker: "Social hub",
     title: "For sharing thoughts, sending DMs, and talking to strangers.",
-    body: "Post and vent on the community board, send private direct messages to friends, and connect with people directly from the active lobby.",
-    footer: "A safe and welcoming space to express yourself freely.",
+    body: "Post and vent on the community board, send private messages to friends, and connect with people from the active lobby.",
+    detail: "A place to say the thing you didn't want to say out loud.",
   },
 ];
 
 export function UseCases() {
   return (
     <section className="mx-auto max-w-7xl px-5 py-24 sm:px-8">
-      <SectionHeading
-        kicker="Built for real moments"
-        title={
-          <>
-            However you watch,
-            <br /> it just works.
-          </>
-        }
-      />
-      <div className="mt-16 grid gap-4 sm:grid-cols-2">
-        {CASES.map((c, i) => (
-          <motion.article
-            key={c.kicker}
-            initial={{ opacity: 0, y: 30 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true, margin: "-60px" }}
-            transition={{ duration: 0.7, delay: (i % 2) * 0.1 }}
-            className="group relative overflow-hidden rounded-3xl border border-hairline bg-gradient-to-b from-white/[0.03] to-transparent p-8 transition hover:border-brand/30"
-          >
-            <div className="absolute -right-16 -top-16 h-40 w-40 rounded-full bg-brand/10 opacity-0 blur-2xl transition group-hover:opacity-100" />
-            <div className="grid h-11 w-11 place-items-center rounded-xl border border-brand/30 bg-brand/10 text-brand">
-              {c.icon}
-            </div>
-            <div className="kicker mt-6 text-white/40">{c.kicker}</div>
-            <h3 className="mt-3 text-2xl font-bold leading-snug">{c.title}</h3>
-            <p className="mt-4 text-sm leading-relaxed text-white/55">
-              {c.body}
-            </p>
-            <p className="mt-4 border-t border-hairline pt-4 text-sm text-white/45">
-              {c.footer}
-            </p>
-          </motion.article>
-        ))}
+      <div className="grid gap-14 lg:grid-cols-[0.72fr_1.28fr] lg:gap-20">
+        <div className="lg:sticky lg:top-28 lg:self-start">
+          <SectionHeading
+            time="00:42"
+            kicker="Built for real moments"
+            title={
+              <>
+                However you watch,
+                <br />
+                it just works.
+              </>
+            }
+            subtitle="One room, four very different reasons to open it."
+          />
+        </div>
+
+        <div className="border-t border-edge">
+          {CASES.map((c, i) => (
+            <Reveal key={c.kicker} delay={i * 0.06}>
+              <article className="group grid gap-5 border-b border-edge py-9 sm:grid-cols-[auto_1fr] sm:gap-7">
+                <span className="grid h-11 w-11 shrink-0 place-items-center rounded-card border border-edge bg-film text-signal transition-colors duration-300 group-hover:border-signal/40 group-hover:bg-signal/10">
+                  <Icon name={c.icon} size={19} />
+                </span>
+                <div>
+                  <p className="data text-dim">{c.kicker}</p>
+                  <h3 className="mt-2.5 font-display text-xl font-bold leading-snug text-bone sm:text-2xl">
+                    {c.title}
+                  </h3>
+                  <p className="mt-3.5 max-w-xl leading-8 text-smoke">{c.body}</p>
+                  <p className="mt-4 border-l-2 border-tungsten/40 pl-4 text-sm leading-relaxed text-dim">
+                    {c.detail}
+                  </p>
+                </div>
+              </article>
+            </Reveal>
+          ))}
+        </div>
       </div>
     </section>
   );

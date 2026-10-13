@@ -25,11 +25,11 @@ export function parseYouTubeId(input: string): string | null {
   return null;
 }
 
-// A short, human-friendly room code like WNP-4F2K.
+// A short, human-friendly room code like PC-4F2K.
 export function makeRoomCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
   for (let i = 0; i < 4; i++)
     code += chars[Math.floor(Math.random() * chars.length)];
-  return `WNP-${code}`;
+  return `PC-${code}`;
 }

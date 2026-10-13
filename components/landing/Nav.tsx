@@ -2,59 +2,95 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { motion } from "framer-motion";
 import { Logo } from "@/components/Logo";
+import { Button } from "@/components/ui";
+import { Icon } from "@/components/Icon";
+
+const LINKS = [
+  { label: "Features", href: "/#features" },
+  { label: "How it works", href: "/#how" },
+  { label: "Lobby", href: "/lobby" },
+  { label: "Board", href: "/vent" },
+  { label: "FAQ", href: "/#faq" },
+];
 
 export function Nav() {
   const [scrolled, setScrolled] = useState(false);
+  const [open, setOpen] = useState(false);
 
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 20);
+    const onScroll = () => setScrolled(window.scrollY > 16);
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
+  // Don't leave the sheet open behind a route change or a resize to desktop.
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    window.addEventListener("resize", close);
+    return () => window.removeEventListener("resize", close);
+  }, [open]);
+
   return (
-    <motion.header
-      initial={{ y: -30, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
+    <header
       className={`fixed inset-x-0 top-0 z-50 transition-colors duration-300 ${
-        scrolled
-          ? "border-b border-hairline bg-black/70 backdrop-blur-xl"
+        scrolled || open
+          ? "border-b border-edge bg-ink/80 backdrop-blur-xl"
           : "border-b border-transparent"
       }`}
     >
-      <nav className="mx-auto flex h-[68px] max-w-7xl items-center justify-between px-5 sm:px-8">
+      <nav className="mx-auto flex h-18 max-w-7xl items-center justify-between gap-6 px-5 sm:px-8">
         <Logo />
-        <div className="flex items-center gap-2 sm:gap-4">
-          <Link
-            href="/lobby"
-            className="hidden rounded-full px-3 py-2 text-sm text-white/70 transition hover:text-white md:block"
-          >
-            Lobby
-          </Link>
-          <Link
-            href="/vent"
-            className="hidden rounded-full px-3 py-2 text-sm text-white/70 transition hover:text-white md:block"
-          >
-            Board
-          </Link>
-          <Link
-            href="/join"
-            className="hidden rounded-full px-4 py-2 text-sm text-white/80 transition hover:text-white sm:block"
-          >
-            Continue with Google
-          </Link>
+
+        <div className="hidden items-center gap-1 lg:flex">
+          {LINKS.map((l) => (
+            <Link
+              key={l.label}
+              href={l.href}
+              className="rounded-lg px-3 py-2 text-sm text-smoke transition-colors hover:text-bone"
+            >
+              {l.label}
+            </Link>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2">
           <Link
             href="/join"
-            className="rounded-full bg-brand px-5 py-2.5 text-sm font-semibold text-white shadow-[0_8px_30px_-10px_rgba(240,69,75,0.9)] transition hover:bg-brand-bright active:scale-95"
+            className="hidden rounded-lg px-3 py-2 text-sm text-smoke transition-colors hover:text-bone sm:block"
           >
+            Sign in
+          </Link>
+          <Button href="/join" size="md">
             Start free
-          </Link>
+          </Button>
+          <button
+            onClick={() => setOpen((v) => !v)}
+            aria-label={open ? "Close menu" : "Open menu"}
+            aria-expanded={open}
+            className="grid h-10 w-10 place-items-center rounded-lg text-smoke transition-colors hover:text-bone lg:hidden"
+          >
+            <Icon name={open ? "close" : "menu"} size={20} />
+          </button>
         </div>
       </nav>
-    </motion.header>
+
+      {open && (
+        <div className="border-t border-edge px-5 pb-5 pt-2 lg:hidden">
+          {LINKS.map((l) => (
+            <Link
+              key={l.label}
+              href={l.href}
+              onClick={() => setOpen(false)}
+              className="block rounded-lg px-2 py-3 text-base text-smoke transition-colors hover:text-bone"
+            >
+              {l.label}
+            </Link>
+          ))}
+        </div>
+      )}
+    </header>
   );
 }

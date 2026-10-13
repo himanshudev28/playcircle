@@ -1,44 +1,60 @@
 import { SectionHeading } from "./SectionHeading";
-import { Accordion, type QA } from "./Accordion";
 import { Reveal } from "@/components/Reveal";
 
-const ITEMS: QA[] = [
+/* Deliberately not an accordion — the long-form accordion lives further down
+   the page. These are the six objections that come up before signing up, so
+   they're answered in the open, in one glance. */
+/* Exported so page.tsx can fold these into the page's single FAQPage graph —
+   two FAQPage blocks on one URL and Google picks one arbitrarily. */
+export const PRE_FAQ_ITEMS = [
   {
-    q: "Is watchnparty free to start?",
-    a: "Yes. Create an account, spin up a room, and start watching together in seconds — no credit card and no download required.",
+    q: "Is PlayCircle free to start?",
+    a: "Yes. Create an account, spin up a room, and start watching together in seconds. No credit card, no download.",
   },
   {
-    q: "Does watchnparty support venting and messaging?",
-    a: "It does. Alongside synced video you get live room chat, private direct messages, and an anonymous community board for sharing thoughts.",
+    q: "Does it do venting and messaging?",
+    a: "It does. Alongside synced video there's live room chat, private direct messages, and an anonymous community board.",
   },
   {
-    q: "What video source works right now?",
-    a: "YouTube works today — paste any link and everyone in the room stays on the same frame. Twitch, Vimeo, and more are planned.",
+    q: "What video sources work right now?",
+    a: "YouTube works today — paste any link and everyone stays on the same frame. Twitch and Vimeo are next.",
   },
   {
-    q: "Will it work on phones?",
-    a: "Yes. watchnparty runs entirely in the browser and is designed to feel simple on both mobile and desktop.",
+    q: "Will it work on my phone?",
+    a: "Yes. Everything runs in the browser and is built to feel simple on both mobile and desktop.",
   },
   {
     q: "How do invites work?",
-    a: "Every room has a short code and a shareable link. Send it to anyone and they drop straight into the same session.",
+    a: "Every room has a short code and a shareable link. Send either one and people drop straight into the session.",
   },
   {
-    q: "Is the room private?",
-    a: "Rooms are private by default — only people with the code or link can join. You can also open a public lobby when you want strangers to find you.",
+    q: "Are rooms private?",
+    a: "Private by default — only people with the code or link can join. Open a public lobby when you want to be found.",
   },
 ];
 
 export function PreFaq() {
   return (
-    <section className="mx-auto max-w-3xl px-5 py-24 sm:px-8">
+    <section className="mx-auto max-w-7xl px-5 py-24 sm:px-8">
       <SectionHeading
-        kicker="Questions people ask before signing up"
-        title="Clear answers reduce hesitation."
+        time="02:15"
+        kicker="Before you sign up"
+        title="The short answers."
+        align="center"
       />
-      <Reveal delay={0.1} className="mt-14">
-        <Accordion items={ITEMS} />
-      </Reveal>
+
+      <dl className="mx-auto mt-14 grid max-w-5xl gap-x-14 gap-y-9 sm:grid-cols-2">
+        {PRE_FAQ_ITEMS.map((item, i) => (
+          <Reveal key={item.q} delay={(i % 2) * 0.08}>
+            <div>
+              <dt className="font-display text-base font-bold text-bone">
+                {item.q}
+              </dt>
+              <dd className="mt-2.5 leading-8 text-smoke">{item.a}</dd>
+            </div>
+          </Reveal>
+        ))}
+      </dl>
     </section>
   );
 }

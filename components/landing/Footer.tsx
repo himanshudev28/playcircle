@@ -1,44 +1,60 @@
 import Link from "next/link";
 import { Logo } from "@/components/Logo";
+import { Icon } from "@/components/Icon";
 
 const COLS = [
   {
     title: "Product",
-    links: ["Features", "How it works", "FAQ", "Sign in"],
+    links: [
+      { label: "Features", href: "/#features" },
+      { label: "How it works", href: "/#how" },
+      { label: "Public lobby", href: "/lobby" },
+      { label: "Anonymous board", href: "/vent" },
+    ],
   },
   {
     title: "Company",
-    links: ["About", "Contact", "Privacy", "Terms"],
+    links: [
+      { label: "About", href: "/about" },
+      { label: "Contact", href: "/contact" },
+      { label: "Privacy", href: "/privacy" },
+      { label: "Terms", href: "/terms" },
+    ],
   },
   {
-    title: "Resources",
-    links: ["Start free", "Room experience", "Use cases", "Security"],
+    title: "Get started",
+    links: [
+      { label: "Create a room", href: "/join" },
+      { label: "Browse rooms", href: "/lobby" },
+      { label: "FAQ", href: "/faq" },
+    ],
   },
 ];
 
 export function Footer() {
   return (
-    <footer className="border-t border-hairline">
+    <footer className="border-t border-edge bg-film/40">
       <div className="mx-auto max-w-7xl px-5 py-16 sm:px-8">
-        <div className="grid gap-12 lg:grid-cols-[1.4fr_1fr_1fr_1fr]">
+        <div className="grid gap-12 lg:grid-cols-[1.5fr_1fr_1fr_1fr]">
           <div>
             <Logo />
-            <p className="mt-5 max-w-xs text-sm leading-relaxed text-white/50">
+            <p className="mt-5 max-w-xs leading-7 text-smoke">
               Private, polished watch rooms for friends, couples, communities,
               and teams who want shared moments without setup friction.
             </p>
           </div>
+
           {COLS.map((col) => (
             <div key={col.title}>
-              <div className="kicker text-white/40">{col.title}</div>
-              <ul className="mt-5 space-y-3">
+              <p className="data text-dim">{col.title}</p>
+              <ul className="mt-5 space-y-3.5">
                 {col.links.map((l) => (
-                  <li key={l}>
+                  <li key={l.label}>
                     <Link
-                      href="/join"
-                      className="text-sm text-white/60 transition hover:text-white"
+                      href={l.href}
+                      className="text-smoke transition-colors hover:text-bone"
                     >
-                      {l}
+                      {l.label}
                     </Link>
                   </li>
                 ))}
@@ -47,21 +63,23 @@ export function Footer() {
           ))}
         </div>
 
-        <p className="mt-14 border-t border-hairline pt-8 text-xs leading-relaxed text-white/35">
-          watchnparty is a browser-based watch party app designed to help you
-          watch YouTube together no matter where you are. Whether you want to
-          host a YouTube watch party with your best friends or sync YouTube with
-          friends for a virtual movie night, our platform provides real-time
-          synchronized video playback with integrated live chat and reactions —
-          the best alternative for remote viewing. Start your free watch party
-          today.
+        <p className="mt-16 max-w-4xl border-t border-edge pt-8 text-[0.8rem] leading-7 text-faint">
+          PlayCircle is a browser-based watch party app for watching YouTube
+          together, wherever everyone happens to be. Host a YouTube watch party
+          with friends or sync YouTube with a partner for a long-distance movie
+          night: rooms give you real-time synchronized playback, live chat, and
+          reactions without downloads or extensions. A free ListenFree
+          alternative for online watch rooms, virtual movie nights, and
+          community screenings.
         </p>
 
-        <div className="mt-8 flex items-center justify-between text-xs text-white/35">
-          <span>© 2026 watchnparty. All rights reserved.</span>
-          <div className="flex items-center gap-4">
-            <span aria-hidden>🌐</span>
-            <span aria-hidden>♥</span>
+        <div className="mt-8 flex flex-wrap items-center justify-between gap-4 border-t border-edge pt-8">
+          <span className="text-[0.8rem] text-faint">
+            © {new Date().getFullYear()} PlayCircle. All rights reserved.
+          </span>
+          <div className="flex items-center gap-4 text-dim">
+            <Icon name="globe" size={17} />
+            <Icon name="heart" size={17} />
           </div>
         </div>
       </div>

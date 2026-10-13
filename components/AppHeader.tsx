@@ -1,41 +1,38 @@
 import Link from "next/link";
 import { Logo } from "@/components/Logo";
+import { Button } from "@/components/ui";
+
+const TABS = [
+  { key: "lobby", label: "Lobby", href: "/lobby" },
+  { key: "vent", label: "Board", href: "/vent" },
+] as const;
 
 export function AppHeader({ active }: { active?: "lobby" | "vent" }) {
   return (
-    <header className="sticky top-0 z-40 border-b border-hairline bg-black/70 backdrop-blur-xl">
-      <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-3 sm:px-8">
-        <div className="flex items-center gap-6">
+    <header className="sticky top-0 z-40 border-b border-edge bg-ink/80 backdrop-blur-xl">
+      <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-5 py-3 sm:px-8">
+        <div className="flex items-center gap-7">
           <Logo size="sm" />
-          <nav className="hidden items-center gap-5 text-sm sm:flex">
-            <Link
-              href="/lobby"
-              className={
-                active === "lobby"
-                  ? "font-semibold text-white"
-                  : "text-white/55 transition hover:text-white"
-              }
-            >
-              Lobby
-            </Link>
-            <Link
-              href="/vent"
-              className={
-                active === "vent"
-                  ? "font-semibold text-white"
-                  : "text-white/55 transition hover:text-white"
-              }
-            >
-              Anonymous board
-            </Link>
+          <nav className="hidden items-center gap-6 text-sm sm:flex">
+            {TABS.map((t) => (
+              <Link
+                key={t.key}
+                href={t.href}
+                aria-current={active === t.key ? "page" : undefined}
+                className={
+                  active === t.key
+                    ? "font-semibold text-bone"
+                    : "text-smoke transition-colors hover:text-bone"
+                }
+              >
+                {t.label}
+              </Link>
+            ))}
           </nav>
         </div>
-        <Link
-          href="/join"
-          className="rounded-full bg-brand px-5 py-2 text-sm font-semibold transition hover:bg-brand-bright active:scale-95"
-        >
+        <Button href="/join" size="md">
           Create room
-        </Link>
+        </Button>
       </div>
     </header>
   );

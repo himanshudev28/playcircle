@@ -4,13 +4,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Logo } from "@/components/Logo";
+import { Icon } from "@/components/Icon";
 import {
+  getClientId,
   getSocket,
   type ChatMessage,
+  type DeniedReason,
   type PlayerAction,
   type RoomUser,
 } from "@/lib/socket";
 import { parseYouTubeId } from "@/lib/youtube";
+import { useCall } from "./useCall";
+import { Avatar, CallPanel } from "./CallPanel";
+import { PeoplePanel } from "./PeoplePanel";
 
 let apiLoading: Promise<void> | null = null;
 function loadYouTubeApi(): Promise<void> {
@@ -26,6 +32,10 @@ function loadYouTubeApi(): Promise<void> {
   return apiLoading;
 }
 
+// Leaving is deferred a tick so React's dev-mode double mount (unmount +
+// immediate remount) doesn't bounce you out of the room and back in.
+let leaveTimer: ReturnType<typeof setTimeout> | undefined;
+
 export function RoomClient({ code }: { code: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -38,6 +48,16 @@ export function RoomClient({ code }: { code: string }) {
   const [copied, setCopied] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [needsGesture, setNeedsGesture] = useState(false);
+  const [selfId, setSelfId] = useState<string | null>(null);
+  const [selfBrowser, setSelfBrowser] = useState<string | null>(null);
+  const [hostId, setHostId] = useState<string | null>(null);
+  const [locked, setLocked] = useState(false);
+  const [denied, setDenied] = useState<{
+    reason: DeniedReason;
+    wasHost: boolean;
+  } | null>(null);
+  const deniedRef = useRef(false);
+  const hostIdRef = useRef<string | null>(null);
 
   const playerRef = useRef<YT.Player | null>(null);
   const playerReadyRef = useRef(false);
@@ -64,6 +84,8 @@ export function RoomClient({ code }: { code: string }) {
     setToast(msg);
     setTimeout(() => setToast(null), 2200);
   }, []);
+
+  const call = useCall(showToast);
 
   // ---- Apply an incoming remote action to the local player ----
   const applyRemote = useCallback((a: PlayerAction) => {
@@ -137,12 +159,17 @@ export function RoomClient({ code }: { code: string }) {
   useEffect(() => {
     if (!name) return;
     const socket = getSocket();
+    clearTimeout(leaveTimer);
 
     const onConnect = () => {
       setConnected(true);
+      setSelfId(socket.id ?? null);
+      // Removed / ended: don't let a reconnect quietly walk back in.
+      if (deniedRef.current) return;
       socket.emit("room:join", {
         code,
         name,
+        clientId: getClientId(),
         title: searchParams.get("title") || undefined,
         isPublic: searchParams.get("public") === "1",
       });
@@ -151,10 +178,17 @@ export function RoomClient({ code }: { code: string }) {
       videoId: string | null;
       isPlaying: boolean;
       time: number;
+      hostId: string | null;
+      locked: boolean;
+      selfBrowser: string;
       users: RoomUser[];
       messages: ChatMessage[];
     }) => {
       setUsers(s.users);
+      setSelfBrowser(s.selfBrowser);
+      setHostId(s.hostId);
+      hostIdRef.current = s.hostId;
+      setLocked(!!s.locked);
       setMessages(s.messages || []);
       if (s.videoId) {
         setVideoId(s.videoId);
@@ -175,9 +209,33 @@ export function RoomClient({ code }: { code: string }) {
       applyRemote(a);
     };
 
+    const onHost = (id: string | null) => {
+      setHostId(id);
+      hostIdRef.current = id;
+      if (id && id === socket.id) showToast("You're the host now");
+    };
+    const onLocked = (l: boolean) => setLocked(l);
+    const onDenied = ({ reason }: { reason: DeniedReason }) => {
+      deniedRef.current = true;
+      call.teardown();
+      try {
+        playerRef.current?.destroy();
+      } catch {
+        /* noop */
+      }
+      playerRef.current = null;
+      playerReadyRef.current = false;
+      setDenied({ reason, wasHost: hostIdRef.current === socket.id });
+    };
+    const onDisconnect = () => setConnected(false);
+
     socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
     socket.on("room:state", onState);
     socket.on("room:users", onUsers);
+    socket.on("room:host", onHost);
+    socket.on("room:locked", onLocked);
+    socket.on("room:denied", onDenied);
     socket.on("chat:message", onChat);
     socket.on("player:action", onAction);
 
@@ -185,10 +243,19 @@ export function RoomClient({ code }: { code: string }) {
 
     return () => {
       socket.off("connect", onConnect);
+      socket.off("disconnect", onDisconnect);
       socket.off("room:state", onState);
       socket.off("room:users", onUsers);
+      socket.off("room:host", onHost);
+      socket.off("room:locked", onLocked);
+      socket.off("room:denied", onDenied);
       socket.off("chat:message", onChat);
       socket.off("player:action", onAction);
+      // Client-side navigation away from the room: free our seat right away
+      // instead of waiting for the socket to drop.
+      if (!deniedRef.current) {
+        leaveTimer = setTimeout(() => socket.emit("room:leave", { code }), 150);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, code]);
@@ -305,12 +372,14 @@ export function RoomClient({ code }: { code: string }) {
   }
 
   if (!name) return null;
+  if (denied) return <RoomClosed {...denied} />;
 
   return (
     <div className="flex min-h-screen flex-col">
       <RoomHeader
         code={code}
         users={users}
+        hostId={hostId}
         connected={connected}
         copied={copied}
         onCopy={copyLink}
@@ -319,7 +388,7 @@ export function RoomClient({ code }: { code: string }) {
       <div className="mx-auto grid w-full max-w-7xl flex-1 gap-4 px-4 py-4 lg:grid-cols-[1fr_360px]">
         {/* Player column */}
         <div className="flex flex-col gap-4">
-          <div className="relative aspect-video w-full overflow-hidden rounded-2xl border border-hairline bg-black">
+          <div className="relative aspect-video w-full overflow-hidden rounded-panel border border-edge bg-ink">
             {videoId ? (
               <div id="yt-player" className="h-full w-full" />
             ) : (
@@ -328,10 +397,10 @@ export function RoomClient({ code }: { code: string }) {
             {videoId && needsGesture && (
               <button
                 onClick={startPlayback}
-                className="absolute inset-0 z-10 grid place-items-center bg-black/70 backdrop-blur-sm transition"
+                className="absolute inset-0 z-10 grid place-items-center bg-ink/80 backdrop-blur-sm transition"
               >
                 <span className="flex flex-col items-center gap-4">
-                  <span className="grid h-20 w-20 place-items-center rounded-full bg-brand shadow-[0_0_50px_-8px_rgba(240,69,75,0.9)] transition hover:scale-105">
+                  <span className="grid h-20 w-20 place-items-center rounded-full bg-signal shadow-[0_0_50px_-8px_rgba(244,67,60,0.85)] transition hover:scale-105">
                     <svg width={30} height={30} viewBox="0 0 24 24" fill="white">
                       <path d="M8 5v14l11-7z" />
                     </svg>
@@ -339,7 +408,7 @@ export function RoomClient({ code }: { code: string }) {
                   <span className="text-sm font-semibold">
                     Tap to join the watch party
                   </span>
-                  <span className="text-xs text-white/50">
+                  <span className="text-xs text-smoke">
                     Your browser paused autoplay — this syncs you to everyone else
                   </span>
                 </span>
@@ -347,38 +416,46 @@ export function RoomClient({ code }: { code: string }) {
             )}
           </div>
 
-          <div className="flex flex-col gap-2 rounded-2xl border border-hairline bg-panel p-3 sm:flex-row">
+          <div className="flex flex-col gap-2 rounded-panel border border-edge bg-film p-3 sm:flex-row">
             <input
               value={urlInput}
               onChange={(e) => setUrlInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && loadVideo()}
               placeholder="Paste a YouTube link to play for everyone…"
-              className="w-full rounded-xl border border-hairline bg-black/40 px-4 py-3 text-sm outline-none transition focus:border-brand"
+              className="w-full rounded-card border border-edge bg-ink px-4 py-3 text-sm outline-none transition focus:border-signal/60"
             />
             <div className="flex gap-2">
               <button
                 onClick={loadVideo}
-                className="flex-1 whitespace-nowrap rounded-xl bg-brand px-5 py-3 text-sm font-semibold transition hover:bg-brand-bright active:scale-95 sm:flex-none"
+                className="flex-1 whitespace-nowrap rounded-card bg-signal px-5 py-3 text-sm font-semibold transition hover:bg-signal-hot active:scale-95 sm:flex-none"
               >
                 Play for all
               </button>
               <button
                 onClick={resync}
                 title="Snap to the room's current position"
-                className="rounded-xl border border-hairline bg-white/[0.04] px-4 py-3 text-sm font-medium transition hover:bg-white/[0.08]"
+                className="rounded-card border border-edge bg-bone/5 px-4 py-3 text-sm font-medium transition hover:bg-bone/10"
               >
                 Resync
               </button>
             </div>
           </div>
+
+          <CallPanel call={call} users={users} selfId={selfId} />
         </div>
 
-        {/* Chat column */}
-        <Chat messages={messages} onSend={(t) => getSocket().emit("chat:message", { text: t })} />
+        <SidePanel
+          users={users}
+          selfId={selfId}
+          selfBrowser={selfBrowser}
+          hostId={hostId}
+          locked={locked}
+          messages={messages}
+        />
       </div>
 
       {toast && (
-        <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full border border-hairline bg-panel-2/95 px-5 py-2.5 text-sm shadow-xl backdrop-blur">
+        <div className="pointer-events-none fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full border border-edge bg-film-2/95 px-5 py-2.5 text-sm shadow-xl backdrop-blur">
           {toast}
         </div>
       )}
@@ -402,32 +479,35 @@ function labelFor(type: PlayerAction["type"]) {
 function RoomHeader({
   code,
   users,
+  hostId,
   connected,
   copied,
   onCopy,
 }: {
   code: string;
   users: RoomUser[];
+  hostId: string | null;
   connected: boolean;
   copied: boolean;
   onCopy: () => void;
 }) {
   return (
-    <header className="sticky top-0 z-40 border-b border-hairline bg-black/70 backdrop-blur-xl">
+    <header className="sticky top-0 z-40 border-b border-edge bg-ink/80 backdrop-blur-xl">
       <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3">
         <div className="flex items-center gap-4">
           <Logo size="sm" />
           <Link
             href="/lobby"
-            className="hidden text-sm text-white/50 transition hover:text-white sm:block"
+            className="hidden items-center gap-1.5 text-sm text-smoke transition hover:text-bone sm:flex"
           >
-            ← Lobby
+            <Icon name="arrowLeft" size={15} />
+            Lobby
           </Link>
-          <span className="hidden items-center gap-2 rounded-full border border-hairline bg-white/[0.03] px-3 py-1.5 font-mono text-sm tracking-wider sm:flex">
+          <span className="hidden items-center gap-2 rounded-full border border-edge bg-film px-3 py-1.5 font-mono text-sm tracking-wider sm:flex">
             {code}
             <span
               className={`h-1.5 w-1.5 rounded-full ${
-                connected ? "bg-emerald-400" : "bg-white/30"
+                connected ? "bg-emerald-400" : "bg-dim"
               }`}
             />
           </span>
@@ -436,27 +516,27 @@ function RoomHeader({
         <div className="flex items-center gap-3">
           <div className="flex -space-x-2">
             {users.slice(0, 5).map((u) => (
-              <span
-                key={u.id}
-                title={u.name}
-                className="grid h-8 w-8 place-items-center rounded-full border-2 border-black text-xs font-bold text-black"
-                style={{ background: u.color }}
-              >
-                {u.name[0]?.toUpperCase()}
+              <span key={u.id} className="relative">
+                <Avatar user={u} size={32} ring="border-film" />
+                {u.id === hostId && (
+                  <span className="absolute -top-1.5 left-1/2 -translate-x-1/2 text-tungsten">
+                    <Icon name="crown" size={11} />
+                  </span>
+                )}
               </span>
             ))}
             {users.length > 5 && (
-              <span className="grid h-8 w-8 place-items-center rounded-full border-2 border-black bg-panel-2 text-xs">
+              <span className="grid h-8 w-8 place-items-center rounded-full border-2 border-film bg-film-2 text-xs">
                 +{users.length - 5}
               </span>
             )}
           </div>
-          <span className="hidden text-sm text-white/50 sm:block">
+          <span className="hidden text-sm text-smoke sm:block">
             {users.length} watching
           </span>
           <button
             onClick={onCopy}
-            className="rounded-xl bg-brand px-4 py-2 text-sm font-semibold transition hover:bg-brand-bright active:scale-95"
+            className="rounded-card bg-signal px-4 py-2 text-sm font-semibold transition hover:bg-signal-hot active:scale-95"
           >
             {copied ? "Copied!" : "Invite"}
           </button>
@@ -468,16 +548,150 @@ function RoomHeader({
 
 function EmptyStage() {
   return (
-    <div className="grid h-full place-items-center bg-[radial-gradient(60%_60%_at_50%_40%,rgba(240,69,75,0.12),transparent_70%)] text-center">
+    <div className="grid h-full place-items-center bg-[radial-gradient(60%_60%_at_50%_40%,rgba(244,67,60,0.12),transparent_70%)] text-center">
       <div className="px-6">
-        <div className="mx-auto grid h-16 w-16 place-items-center rounded-full border border-hairline bg-white/[0.03] text-3xl">
-          🎬
+        <div className="mx-auto grid h-16 w-16 place-items-center rounded-full border border-edge bg-film text-dim">
+          <Icon name="film" size={26} />
         </div>
-        <h2 className="mt-5 text-xl font-bold">Nothing playing yet</h2>
-        <p className="mt-2 text-sm text-white/50">
+        <h2 className="mt-5 font-display text-xl font-bold text-bone">
+          Nothing playing yet
+        </h2>
+        <p className="mt-2 text-sm text-smoke">
           Paste a YouTube link below and it starts for everyone in the room.
         </p>
       </div>
+    </div>
+  );
+}
+
+type SideTab = "chat" | "people";
+
+function SidePanel({
+  users,
+  selfId,
+  selfBrowser,
+  hostId,
+  locked,
+  messages,
+}: {
+  users: RoomUser[];
+  selfId: string | null;
+  selfBrowser: string | null;
+  hostId: string | null;
+  locked: boolean;
+  messages: ChatMessage[];
+}) {
+  const [tab, setTab] = useState<SideTab>("chat");
+  const isHost = !!selfId && selfId === hostId;
+  const tabs: { id: SideTab; label: string; count?: number }[] = [
+    { id: "chat", label: "Chat" },
+    { id: "people", label: isHost ? "People · Manage" : "People", count: users.length },
+  ];
+
+  return (
+    <div className="flex h-[60vh] min-h-0 flex-col rounded-panel border border-edge bg-film lg:h-[calc(100vh-6.5rem)] lg:sticky lg:top-[5.25rem]">
+      <div role="tablist" className="flex gap-1 border-b border-edge px-2 pt-2">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={tab === t.id}
+            onClick={() => setTab(t.id)}
+            className={`-mb-px flex items-center gap-1.5 border-b-2 px-3 pb-2.5 pt-1 text-sm font-semibold transition ${
+              tab === t.id
+                ? "border-signal text-bone"
+                : "border-transparent text-smoke hover:text-bone"
+            }`}
+          >
+            {t.label}
+            {t.count !== undefined && (
+              <span className="rounded-full bg-bone/8 px-1.5 text-[11px] tabular-nums text-smoke">
+                {t.count}
+              </span>
+            )}
+            {t.id === "people" && locked && (
+              <Icon name="lock" size={12} className="text-tungsten" />
+            )}
+          </button>
+        ))}
+      </div>
+      {tab === "chat" ? (
+        <Chat
+          messages={messages}
+          onSend={(t) => getSocket().emit("chat:message", { text: t })}
+        />
+      ) : (
+        <PeoplePanel
+          users={users}
+          selfId={selfId}
+          selfBrowser={selfBrowser}
+          hostId={hostId}
+          locked={locked}
+        />
+      )}
+    </div>
+  );
+}
+
+const CLOSED_COPY: Record<
+  DeniedReason,
+  { title: string; body: string; hostBody?: string }
+> = {
+  removed: {
+    title: "You were removed from this room",
+    body: "The host took you out of this watch party, so this link won't let you back in.",
+  },
+  locked: {
+    title: "This room is locked",
+    body: "The host isn't letting new people in right now. Ask them to unlock it, then try the link again.",
+  },
+  ended: {
+    title: "This room has ended",
+    body: "The host closed the room for everyone. Start your own or find another in the lobby.",
+    hostBody: "You ended the room — everyone has been sent out.",
+  },
+};
+
+function RoomClosed({
+  reason,
+  wasHost,
+}: {
+  reason: DeniedReason;
+  wasHost: boolean;
+}) {
+  const copy = CLOSED_COPY[reason];
+  return (
+    <div className="flex min-h-screen flex-col">
+      <header className="border-b border-edge">
+        <div className="mx-auto flex max-w-7xl items-center px-4 py-3">
+          <Logo size="sm" />
+        </div>
+      </header>
+      <main className="grid flex-1 place-items-center px-4">
+        <div className="max-w-md text-center">
+          <div className="mx-auto grid h-16 w-16 place-items-center rounded-full border border-edge bg-film text-dim">
+            <Icon name={reason === "locked" ? "lock" : "door"} size={26} />
+          </div>
+          <h1 className="mt-6 font-display text-2xl font-bold">{copy.title}</h1>
+          <p className="mt-3 text-sm text-smoke">
+            {wasHost && copy.hostBody ? copy.hostBody : copy.body}
+          </p>
+          <div className="mt-8 flex justify-center gap-3">
+            <Link
+              href="/lobby"
+              className="rounded-card bg-signal px-5 py-3 text-sm font-semibold transition hover:bg-signal-hot active:scale-95"
+            >
+              Go to the lobby
+            </Link>
+            <Link
+              href="/"
+              className="rounded-card border border-edge bg-bone/5 px-5 py-3 text-sm font-medium transition hover:bg-bone/10"
+            >
+              Home
+            </Link>
+          </div>
+        </div>
+      </main>
     </div>
   );
 }
@@ -504,21 +718,18 @@ function Chat({
   }
 
   return (
-    <div className="flex h-[60vh] flex-col rounded-2xl border border-hairline bg-panel lg:h-auto">
-      <div className="border-b border-hairline px-4 py-3 text-sm font-semibold">
-        Room chat
-      </div>
+    <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
         {messages.length === 0 && (
-          <p className="mt-6 text-center text-sm text-white/35">
-            Say hi 👋 Reactions show up here in real time.
+          <p className="mt-6 text-center text-sm text-faint">
+            No messages yet. Whatever you type shows up for everyone instantly.
           </p>
         )}
         {messages.map((m) =>
           m.system ? (
             <p
               key={m.id}
-              className="text-center text-xs italic text-white/35"
+              className="text-center text-xs italic text-faint"
             >
               {m.text}
             </p>
@@ -537,25 +748,25 @@ function Chat({
                 >
                   {m.name}
                 </span>
-                <p className="break-words text-sm text-white/85">{m.text}</p>
+                <p className="break-words text-sm text-bone/90">{m.text}</p>
               </div>
             </div>
           )
         )}
         <div ref={endRef} />
       </div>
-      <div className="flex gap-2 border-t border-hairline p-3">
+      <div className="flex gap-2 border-t border-edge p-3">
         <input
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && send()}
           placeholder="Message the room…"
           maxLength={500}
-          className="w-full rounded-xl border border-hairline bg-black/40 px-4 py-2.5 text-sm outline-none transition focus:border-brand"
+          className="w-full rounded-card border border-edge bg-ink px-4 py-2.5 text-sm outline-none transition focus:border-signal/60"
         />
         <button
           onClick={send}
-          className="rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold transition hover:bg-brand-bright active:scale-95"
+          className="rounded-card bg-signal px-4 py-2.5 text-sm font-semibold transition hover:bg-signal-hot active:scale-95"
         >
           Send
         </button>
