@@ -78,8 +78,8 @@ At `/vent`, anyone can post a thought anonymously. Each post gets a random alias
 ## 🚀 Quick start
 
 ```bash
-git clone https://github.com/himanshudev28/watchnparty.git
-cd watchnparty
+git clone https://github.com/himanshudev28/playcircle.git
+cd playcircle
 npm install
 npm run dev        # Next.js + Socket.IO on http://localhost:3000
 ```
