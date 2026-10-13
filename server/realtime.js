@@ -194,7 +194,9 @@ function attachRealtime(io, options = {}) {
 
      A companion is a second, hidden connection from the same person — the
      Android app's screen-share link, sitting next to its in-app room page.
-     It never holds the crown, isn't listed, and borrows its person's rights. */
+     It never holds the crown, isn't listed, and borrows its person's rights.
+     While the phone sleeps the in-app page can drop; then the companion
+     stands in for its person (listed in their place) until the page is back. */
 
   // Everyone actually in the room, without companion connections.
   function people(room) {
@@ -259,9 +261,22 @@ function attachRealtime(io, options = {}) {
     return new Set([...room.users.values()].map((u) => u.clientId)).size;
   }
 
+  // Everyone to list: people, plus a companion standing in for a person
+  // whose own page has dropped (one per person).
+  function listed(room) {
+    const out = people(room);
+    const here = new Set(out.map(([, u]) => u.clientId));
+    for (const [sid, u] of room.users) {
+      if (!u.companion || here.has(u.clientId)) continue;
+      here.add(u.clientId);
+      out.push([sid, u]);
+    }
+    return out;
+  }
+
   // Public view of the people in a room. clientIds stay server-side.
   function publicUsers(room) {
-    return people(room).map(([id, u]) => {
+    return listed(room).map(([id, u]) => {
       const c = room.callers.get(id);
       return {
         id,
@@ -587,15 +602,17 @@ function attachRealtime(io, options = {}) {
     if (room.isPublic) broadcastLobby();
   }
 
-  // A companion can't stay in a room its person has left (back button, app
-  // swiped away): once they've been gone a while, it goes too — ending
-  // its share and letting an empty room close.
+  // A companion that isn't sharing can't stay in a room its person has
+  // left: once they've been gone a while, it goes too, letting an empty
+  // room close. One that's on stage stays — the page inside the app drops
+  // while the phone shows other apps, and the share must go on.
   function dropOrphanCompanions(room, clientId) {
     setTimeout(() => {
       if (rooms.get(room.code) !== room) return;
       if (people(room).some(([, u]) => u.clientId === clientId)) return;
       for (const [sid, u] of [...room.users.entries()]) {
         if (!u.companion || u.clientId !== clientId) continue;
+        if (isLive(room.media) && room.media.presenter === sid) continue;
         const s = io.sockets.sockets.get(sid);
         if (!s) continue;
         s.emit("room:denied", { reason: "missing" });
@@ -1011,11 +1028,15 @@ function attachRealtime(io, options = {}) {
       }
       const cid = str(p.clientId, 64) || socket.id;
       const displayName = str(p.name, 24) || "Guest";
-      // A companion only joins a room its person is in right now — it never
-      // makes one, and never outlives them into an empty room.
+      // A companion only joins a room its person is in right now — or one
+      // where its own earlier link still is (it reconnected after a network
+      // switch while the page sleeps). It never makes a room.
       const companion = p.companion === true;
       const target = rooms.get(code);
-      if (companion && !(target && people(target).some(([, u]) => u.clientId === cid))) {
+      if (
+        companion &&
+        !(target && [...target.users.values()].some((u) => u.clientId === cid))
+      ) {
         socket.emit("room:denied", { reason: "missing" });
         return;
       }

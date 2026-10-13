@@ -222,6 +222,9 @@ class MainActivity : ComponentActivity() {
                 .replace("; wv)", ")")
                 .replace(" Version/4.0", "")
         }
+        // Keep the page's renderer important while other apps are in front:
+        // during a screen share the room page should stay connected.
+        webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         // YouTube's embedded player needs its cookies.
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
 

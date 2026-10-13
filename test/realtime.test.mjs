@@ -1618,21 +1618,46 @@ describe("realtime", () => {
       assert.equal(srv.rt.rooms.get(code).hostId, host.id);
     });
 
-    test("goes once its person has left, ending the share and freeing the room", async () => {
+    test("an idle companion goes once its person has left", async () => {
+      const { code, viewer } = await pair();
+      const app = await srv.connect();
+      await join(app, { code, name: "Viewer", clientId: `v-${code}`, companion: true });
+      const sentOut = once(app, "room:denied", (d) => d.reason === "missing", 2000);
+      viewer.disconnect();
+      await sentOut;
+      const room = srv.rt.rooms.get(code);
+      assert.ok(![...room.users.values()].some((u) => u.companion));
+    });
+
+    test("a sharing companion stands in for its person while their page is away", async () => {
       const { code, host, viewer } = await pair();
       const app = await srv.connect();
       await join(app, { code, name: "Viewer", clientId: `v-${code}`, companion: true });
       host.emit("host:playback", { mode: "everyone" });
       await ping(host);
       const { streamId } = await ack(app, "stage:start", { source: "screen" });
-      assert.equal(typeof streamId, "string");
 
-      const sentOut = once(app, "room:denied", (d) => d.reason === "missing", 2000);
-      const cleared = once(host, "player:action", (a) => a.type === "load" && a.media === null, 2000);
+      // The page drops (phone showing other apps): the share goes on, the
+      // person stays listed (as their companion) and nobody "left".
+      const noLeft = none(host, "chat:message", (m) => / left /.test(m.text), 500);
+      const stillLive = none(host, "player:action", (a) => a.type === "load", 500);
+      const listed = once(host, "room:users", (users) => users.some((u) => u.id === app.id));
       viewer.disconnect();
-      await Promise.all([sentOut, cleared]);
-      const room = srv.rt.rooms.get(code);
-      assert.ok(![...room.users.values()].some((u) => u.companion));
+      await Promise.all([noLeft, stillLive, listed]);
+      assert.equal(srv.rt.rooms.get(code).media.streamId, streamId);
+      assert.equal(srv.rt.rooms.get(code).hostId, host.id);
+
+      // A reconnected companion is let in while the page still sleeps.
+      const fresh = await srv.connect();
+      const st = await join(fresh, { code, name: "Viewer", clientId: `v-${code}`, companion: true });
+      assert.equal(st.media, null);
+      assert.equal((await ack(fresh, "stage:start", { source: "screen" })).ok, true);
+
+      // The page comes back: listed once, as itself.
+      const page = await srv.connect();
+      const back = await join(page, { code, name: "Viewer", clientId: `v-${code}` });
+      const mine = back.users.filter((u) => u.name === "Viewer");
+      assert.deepEqual(mine.map((u) => u.id), [page.id]);
     });
 
     test("a person back within the grace period keeps their companion", async () => {
